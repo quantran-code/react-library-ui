@@ -37,12 +37,23 @@ export async function fetchBook(id: number): Promise<Book> {
 }
 
 // A recorded loan as the loans service sends it, forwarded by the gateway.
+// returnedAt is absent (or null) until the loan has been returned.
 export type Loan = {
   id: number;
   bookId: number;
   borrowedAt: string;
   dueAt: string;
+  returnedAt?: string | null;
 };
+
+// The loans themselves: /api/loans is the gateway route, proxied by vite in dev.
+export async function fetchLoans(): Promise<Loan[]> {
+  const response = await fetch(`${BASE_URL}/api/loans`);
+  if (!response.ok) {
+    throw new Error(`loans answered ${response.status}`);
+  }
+  return (await response.json()) as Loan[];
+}
 
 // Borrowing records the loan, which takes the book out of the catalogue; the
 // row's availability is refreshed from the catalogue afterwards.
@@ -54,6 +65,18 @@ export async function borrowBook(bookId: number): Promise<Loan> {
   });
   if (!response.ok) {
     throw new Error(`loan for book ${bookId} answered ${response.status}`);
+  }
+  return (await response.json()) as Loan;
+}
+
+// Returning stamps the loan's returnedAt and puts the book back in the
+// catalogue; the return call itself carries no body.
+export async function returnLoan(id: number): Promise<Loan> {
+  const response = await fetch(`${BASE_URL}/api/loans/${id}/return`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(`return of loan ${id} answered ${response.status}`);
   }
   return (await response.json()) as Loan;
 }
