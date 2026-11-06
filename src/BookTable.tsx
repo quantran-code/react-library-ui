@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { borrowBook, fetchBooks, fetchLoans, returnLoan } from "./api";
+import {
+  borrowBook,
+  fetchBooks,
+  fetchLoans,
+  newRequestId,
+  returnLoan,
+} from "./api";
 import type { Book, Loan } from "./api";
 
 // The catalogue: one row per book, with a single loading or error row while the
@@ -68,14 +74,18 @@ export default function BookTable(): JSX.Element {
   // the loans are re-fetched so the row shows the availability the gateway now
   // reports and the loan that can be returned.
   async function handleBorrow(bookId: number): Promise<void> {
+    // One id per click: the action call and the loans re-fetch that follows it
+    // are one traceable request in the loan service's logs.
+    const requestId = newRequestId();
+
     setBorrowingId(bookId);
     setBorrowError(null);
 
     try {
-      await borrowBook(bookId);
+      await borrowBook(bookId, requestId);
       const [catalogue, recordedLoans] = await Promise.all([
         fetchBooks(),
-        fetchLoans(),
+        fetchLoans(requestId),
       ]);
       setBooks(catalogue);
       setLoans(recordedLoans);
@@ -91,14 +101,18 @@ export default function BookTable(): JSX.Element {
   // Returning puts the book back on the shelf: the catalogue and the loans are
   // both re-fetched so the row shows Available Yes and offers Borrow again.
   async function handleReturn(loanId: number): Promise<void> {
+    // As with Borrow, the click mints exactly one id and the follow-up re-fetch
+    // continues it rather than starting a second trace.
+    const requestId = newRequestId();
+
     setReturningId(loanId);
     setReturnError(null);
 
     try {
-      await returnLoan(loanId);
+      await returnLoan(loanId, requestId);
       const [catalogue, recordedLoans] = await Promise.all([
         fetchBooks(),
-        fetchLoans(),
+        fetchLoans(requestId),
       ]);
       setBooks(catalogue);
       setLoans(recordedLoans);
