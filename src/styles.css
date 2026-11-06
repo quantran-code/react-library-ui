@@ -1,0 +1,28 @@
+/* The catalogue table and its loading/error rows. */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
+
+table th,
+table td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid #d0d5dd;
+}
+
+table thead th {
+  background: #f2f4f7;
+}
+
+tr.loading-row td {
+  color: #475467;
+  font-style: italic;
+}
+
+tr.error-row td {
+  color: #b42318;
+  background: #fef3f2;
+  font-weight: 600;
+}
