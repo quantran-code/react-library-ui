@@ -35,3 +35,25 @@ export async function fetchBook(id: number): Promise<Book> {
   }
   return (await response.json()) as Book;
 }
+
+// A recorded loan as the loans service sends it, forwarded by the gateway.
+export type Loan = {
+  id: number;
+  bookId: number;
+  borrowedAt: string;
+  dueAt: string;
+};
+
+// Borrowing records the loan, which takes the book out of the catalogue; the
+// row's availability is refreshed from the catalogue afterwards.
+export async function borrowBook(bookId: number): Promise<Loan> {
+  const response = await fetch(`${BASE_URL}/api/loans`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bookId }),
+  });
+  if (!response.ok) {
+    throw new Error(`loan for book ${bookId} answered ${response.status}`);
+  }
+  return (await response.json()) as Loan;
+}
