@@ -49,3 +49,52 @@ tr.error-row td {
   color: #b42318;
   font-weight: 600;
 }
+
+/* Selecting a row's title reads that book and shows its detail below the table. */
+.book-select {
+  padding: 0;
+  border: none;
+  background: none;
+  color: #1d4ed8;
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.book-row.selected {
+  background: #eff8ff;
+}
+
+/* The detail area below the table, for the book the user selected. */
+.book-detail {
+  margin-top: 1.5rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+}
+
+.book-detail h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.15rem;
+}
+
+.book-detail dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0;
+}
+
+.book-detail dt {
+  font-weight: 600;
+}
+
+.book-detail dd {
+  margin: 0;
+}
+
+.book-detail-error {
+  color: #b42318;
+  font-weight: 600;
+}
