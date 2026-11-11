@@ -1,15 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { borrowBook, fetchBook, fetchBooks } from "./api";
+import { fetchBook, fetchBooks } from "./api";
 import type { Book } from "./api";
 
 // The catalogue: one row per book, with a single loading or error row while the
-// gateway has nothing to show, and a Borrow action per available book.
+// gateway has nothing to show.
 export default function BookTable(): JSX.Element {
   const [books, setBooks] = useState<Book[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [borrowingId, setBorrowingId] = useState<number | null>(null);
-  const [borrowError, setBorrowError] = useState<string | null>(null);
   const [selectedBookId, setSelectedBookId] = useState<number | null>(null);
   const [bookDetail, setBookDetail] = useState<Book | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -46,25 +44,6 @@ export default function BookTable(): JSX.Element {
   }, []);
 
   const bookRows = books ?? [];
-
-  // The catalogue is the source of truth: after a successful loan the list is
-  // re-fetched so the row shows the availability the gateway now reports.
-  async function handleBorrow(bookId: number): Promise<void> {
-    setBorrowingId(bookId);
-    setBorrowError(null);
-
-    try {
-      await borrowBook(bookId);
-      const catalogue = await fetchBooks();
-      setBooks(catalogue);
-    } catch (reason: unknown) {
-      setBorrowError(
-        reason instanceof Error ? reason.message : "borrow unavailable",
-      );
-    } finally {
-      setBorrowingId(null);
-    }
-  }
 
   // Selecting a row reads that one book through the gateway's detail route, so
   // the detail area below the table always shows what the service reports.
@@ -104,30 +83,22 @@ export default function BookTable(): JSX.Element {
             <th>Title</th>
             <th>Author</th>
             <th>Available</th>
-            <th>Borrow</th>
           </tr>
         </thead>
         <tbody>
           {loading ? (
             <tr className="loading-row">
-              <td colSpan={5}>Loading catalogue…</td>
+              <td colSpan={4}>Loading catalogue…</td>
             </tr>
           ) : null}
           {!loading && error !== null ? (
             <tr className="error-row">
-              <td colSpan={5}>{error}</td>
+              <td colSpan={4}>{error}</td>
             </tr>
           ) : null}
           {!loading && error === null && bookRows.length === 0 ? (
             <tr>
-              <td colSpan={5}>No books in the catalogue.</td>
-            </tr>
-          ) : null}
-          {borrowError !== null ? (
-            <tr className="error-row">
-              <td colSpan={5} className="borrow-error">
-                {borrowError}
-              </td>
+              <td colSpan={4}>No books in the catalogue.</td>
             </tr>
           ) : null}
           {!loading && error === null
@@ -150,18 +121,6 @@ export default function BookTable(): JSX.Element {
                   </td>
                   <td>{book.author}</td>
                   <td>{book.available ? "Yes" : "No"}</td>
-                  <td>
-                    {book.available ? (
-                      <button
-                        type="button"
-                        className="borrow-button"
-                        disabled={borrowingId === book.id}
-                        onClick={() => handleBorrow(book.id)}
-                      >
-                        Borrow
-                      </button>
-                    ) : null}
-                  </td>
                 </tr>
               ))
             : null}

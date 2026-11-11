@@ -27,29 +27,6 @@ tr.error-row td {
   font-weight: 600;
 }
 
-/* The per-row Borrow action and the failure it can report. */
-.borrow-button {
-  padding: 0.25rem 0.75rem;
-  border: 1px solid #1d2939;
-  border-radius: 4px;
-  background: #ffffff;
-  color: #1d2939;
-  font: inherit;
-  cursor: pointer;
-}
-
-.borrow-button:disabled {
-  border-color: #d0d5dd;
-  color: #98a2b3;
-  cursor: not-allowed;
-  opacity: 0.7;
-}
-
-.borrow-error {
-  color: #b42318;
-  font-weight: 600;
-}
-
 /* Selecting a row's title reads that book and shows its detail below the table. */
 .book-select {
   padding: 0;
