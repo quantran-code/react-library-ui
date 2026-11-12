@@ -1,15 +1,21 @@
 // One place for the gateway's address and the shapes the UI reads.
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 
-export type Health = { status: string };
+// Every hop of the chain reports the same id, so a failed action can be traced
+// from the browser banner to the service that answered it.
+export const REQUEST_ID_HEADER = "X-Request-Id";
 
-export async function fetchHealth(): Promise<Health> {
-  const response = await fetch(`${BASE_URL}/health`);
-  if (!response.ok) {
-    throw new Error(`health answered ${response.status}`);
-  }
-  return (await response.json()) as Health;
+// One user action mints one id: 16 cryptographically random bytes render as 32
+// lowercase hex characters, which is the value every hop echoes back verbatim.
+export function newRequestId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
+
+export type Health = { status: string };
 
 // A catalogue record as the gateway sends it.
 export type Book = {
@@ -18,23 +24,6 @@ export type Book = {
   author: string;
   available: boolean;
 };
-
-// The catalogue itself: /api/books is the gateway route, proxied by vite in dev.
-export async function fetchBooks(): Promise<Book[]> {
-  const response = await fetch(`${BASE_URL}/api/books`);
-  if (!response.ok) {
-    throw new Error(`books answered ${response.status}`);
-  }
-  return (await response.json()) as Book[];
-}
-
-export async function fetchBook(id: number): Promise<Book> {
-  const response = await fetch(`${BASE_URL}/api/books/${id}`);
-  if (!response.ok) {
-    throw new Error(`book ${id} answered ${response.status}`);
-  }
-  return (await response.json()) as Book;
-}
 
 // A recorded loan as the gateway sends it: the timestamps are RFC 3339 in UTC,
 // left as strings for whoever displays them. The services omit returnedAt on a
@@ -49,21 +38,27 @@ export type Loan = {
 
 // The API answers a refused call with its own wording and status, so both
 // travel together and a caller can branch on 404 or 409 without parsing text.
+// The request id travels with them too, so every error surface can show the id
+// the log lines of that one action are keyed on.
 export class LendingError extends Error {
   readonly status: number;
+  // The id the entry point reported for the failed request; it is the id the
+  // request was sent with when the answer carries no header of its own.
+  readonly requestId: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, requestId: string) {
     super(message);
     this.name = "LendingError";
     this.status = status;
+    this.requestId = requestId;
   }
 }
 
 // A refused borrow keeps its own name on that shape, so a caller that reaches
 // for BorrowError still recognises it.
 export class BorrowError extends LendingError {
-  constructor(status: number, message: string) {
-    super(status, message);
+  constructor(status: number, message: string, requestId: string) {
+    super(status, message, requestId);
     this.name = "BorrowError";
   }
 }
@@ -91,56 +86,138 @@ async function failureMessage(
   return message;
 }
 
-// Borrowing: POST /api/loans takes the copy off the shelf and records the loan.
-export async function borrowBook(bookId: number): Promise<Loan> {
-  const response = await fetch(`${BASE_URL}/api/loans`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ bookId }),
-  });
+// What every error surface renders for a failed action: the API's own wording
+// with the full request id appended, so a screenshot is enough to find the
+// matching log lines. Anything that is not a LendingError has no id to show.
+export function failureText(reason: unknown, fallback: string): string {
+  if (reason instanceof LendingError) {
+    return `${reason.message} (Request ${reason.requestId} failed)`;
+  }
+  return reason instanceof Error ? reason.message : fallback;
+}
+
+// The single exit every request takes: it mints an id unless the caller is
+// retrying the same action with the id it already used, sends it as
+// X-Request-Id and keeps whatever id came back so a failure can report it.
+async function sendRequest(
+  path: string,
+  action: string,
+  init?: RequestInit,
+  requestId?: string,
+): Promise<Response> {
+  const sentId = requestId ?? newRequestId();
+  const headers = new Headers(init?.headers);
+  headers.set(REQUEST_ID_HEADER, sentId);
+
+  const response = await fetch(path, { ...init, headers });
   if (!response.ok) {
-    throw new BorrowError(
+    const answeredId = response.headers?.get(REQUEST_ID_HEADER) ?? "";
+    throw new LendingError(
       response.status,
-      await failureMessage(response, "borrow"),
+      await failureMessage(response, action),
+      answeredId === "" ? sentId : answeredId,
     );
+  }
+  return response;
+}
+
+export async function fetchHealth(requestId?: string): Promise<Health> {
+  const response = await sendRequest(
+    `${BASE_URL}/health`,
+    "health",
+    undefined,
+    requestId,
+  );
+  return (await response.json()) as Health;
+}
+
+// The catalogue itself: /api/books is the gateway route, proxied by vite in dev.
+export async function fetchBooks(requestId?: string): Promise<Book[]> {
+  const response = await sendRequest(
+    `${BASE_URL}/api/books`,
+    "books",
+    undefined,
+    requestId,
+  );
+  return (await response.json()) as Book[];
+}
+
+export async function fetchBook(
+  id: number,
+  requestId?: string,
+): Promise<Book> {
+  const response = await sendRequest(
+    `${BASE_URL}/api/books/${id}`,
+    `book ${id}`,
+    undefined,
+    requestId,
+  );
+  return (await response.json()) as Book;
+}
+
+// Borrowing: POST /api/loans takes the copy off the shelf and records the loan.
+export async function borrowBook(
+  bookId: number,
+  requestId?: string,
+): Promise<Loan> {
+  let response: Response;
+  try {
+    response = await sendRequest(
+      `${BASE_URL}/api/loans`,
+      "borrow",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bookId }),
+      },
+      requestId,
+    );
+  } catch (reason: unknown) {
+    // A refused borrow keeps the shape it has always had, with the id that was
+    // sent or echoed on it.
+    if (reason instanceof LendingError && !(reason instanceof BorrowError)) {
+      throw new BorrowError(reason.status, reason.message, reason.requestId);
+    }
+    throw reason;
   }
   return (await response.json()) as Loan;
 }
 
 // The loans on record, newest first; the service answers [] when there are none.
-export async function fetchLoans(): Promise<Loan[]> {
-  const response = await fetch(`${BASE_URL}/api/loans`);
-  if (!response.ok) {
-    throw new LendingError(
-      response.status,
-      await failureMessage(response, "loans"),
-    );
-  }
+export async function fetchLoans(requestId?: string): Promise<Loan[]> {
+  const response = await sendRequest(
+    `${BASE_URL}/api/loans`,
+    "loans",
+    undefined,
+    requestId,
+  );
   return (await response.json()) as Loan[];
 }
 
-export async function fetchLoan(id: number): Promise<Loan> {
-  const response = await fetch(`${BASE_URL}/api/loans/${id}`);
-  if (!response.ok) {
-    throw new LendingError(
-      response.status,
-      await failureMessage(response, `loan ${id}`),
-    );
-  }
+export async function fetchLoan(
+  id: number,
+  requestId?: string,
+): Promise<Loan> {
+  const response = await sendRequest(
+    `${BASE_URL}/api/loans/${id}`,
+    `loan ${id}`,
+    undefined,
+    requestId,
+  );
   return (await response.json()) as Loan;
 }
 
 // Returning: POST /api/loans/{id}/return puts the copy back on the shelf. The
 // service reads the id from the path, so the request carries no body.
-export async function returnLoan(id: number): Promise<Loan> {
-  const response = await fetch(`${BASE_URL}/api/loans/${id}/return`, {
-    method: "POST",
-  });
-  if (!response.ok) {
-    throw new LendingError(
-      response.status,
-      await failureMessage(response, `return ${id}`),
-    );
-  }
+export async function returnLoan(
+  id: number,
+  requestId?: string,
+): Promise<Loan> {
+  const response = await sendRequest(
+    `${BASE_URL}/api/loans/${id}/return`,
+    `return ${id}`,
+    { method: "POST" },
+    requestId,
+  );
   return (await response.json()) as Loan;
 }

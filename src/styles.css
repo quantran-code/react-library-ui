@@ -25,6 +25,8 @@ tr.error-row td {
   color: #b42318;
   background: #fef3f2;
   font-weight: 600;
+  /* A full 32-character request id must wrap rather than overflow the row. */
+  overflow-wrap: anywhere;
 }
 
 /* Selecting a row's title reads that book and shows its detail below the table. */
@@ -65,6 +67,7 @@ tr.error-row td {
 .borrow-error-row td {
   color: #b42318;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 /* The detail area below the table, for the book the user selected. */
@@ -128,4 +131,5 @@ tr.error-row td {
 .loan-row-error td {
   color: #b42318;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }

@@ -2,19 +2,59 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BorrowError,
   LendingError,
+  REQUEST_ID_HEADER,
   borrowBook,
+  failureText,
   fetchBook,
   fetchBooks,
+  fetchHealth,
   fetchLoan,
   fetchLoans,
+  newRequestId,
   returnLoan,
 } from "./api";
 
 // The API module is the one place the UI builds URLs; these tests pin the paths
-// the gateway expects without needing a browser or a running service.
+// the gateway expects and the request id every call carries, without needing a
+// browser or a running service.
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+// A minted id is 16 random bytes as 32 lowercase hex characters.
+const REQUEST_ID_PATTERN = /^[0-9a-f]{32}$/;
+
+// A 32-hex id standing in for the one the gateway echoes back.
+const ANSWERED_ID = "9f2c4a1e8b7d4c3fa1b2c3d4e5f60718";
+
+type FetchMock = ReturnType<typeof vi.fn>;
+
+// The options a stubbed fetch was called with; the mock is untyped, so each
+// argument is re-narrowed to the shape the API module passes.
+function sentInit(
+  fetchMock: FetchMock,
+  callIndex = 0,
+): RequestInit | undefined {
+  const call = fetchMock.mock.calls[callIndex];
+  if (call === undefined) {
+    throw new Error(`fetch call ${callIndex} was never made`);
+  }
+  return call[1];
+}
+
+// The X-Request-Id each call sent, in call order.
+function sentRequestIds(fetchMock: FetchMock): Array<string | null> {
+  return fetchMock.mock.calls.map(
+    (_call, callIndex) =>
+      new Headers(sentInit(fetchMock, callIndex)?.headers).get(
+        REQUEST_ID_HEADER,
+      ),
+  );
+}
+
+function sentRequestId(fetchMock: FetchMock): string | null {
+  return sentRequestIds(fetchMock)[0] ?? null;
+}
 
 // Collects the BorrowError a refused borrow throws, failing the test if the
 // call did not reject at all.
@@ -54,7 +94,8 @@ describe("catalogue API", () => {
 
     const books = await fetchBooks();
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/books");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/books");
+    expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
     expect(books).toHaveLength(1);
     expect(books[0].title).toBe("Dune");
   });
@@ -69,7 +110,8 @@ describe("catalogue API", () => {
 
     const book = await fetchBook(3);
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/books/3");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/books/3");
+    expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
     expect(book.id).toBe(3);
     expect(book.title).toBe("Dune");
     expect(book.author).toBe("Herbert");
@@ -79,6 +121,20 @@ describe("catalogue API", () => {
   it("surfaces a missing book with the status it answered", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
     await expect(fetchBook(3)).rejects.toThrow(/404/);
+  });
+
+  it("reads the gateway health from /health", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: "ok" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const health = await fetchHealth();
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/health");
+    expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
+    expect(health.status).toBe("ok");
   });
 
   it("borrowBook posts the book id to /api/loans", async () => {
@@ -97,11 +153,14 @@ describe("catalogue API", () => {
 
     const borrowed = await borrowBook(1);
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/loans", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bookId: 1 }),
-    });
+    const init = sentInit(fetchMock);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/loans");
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBe(JSON.stringify({ bookId: 1 }));
+    expect(new Headers(init?.headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+    expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
     expect(borrowed.id).toBe(1);
     expect(borrowed.bookId).toBe(1);
     expect(borrowed.borrowedAt).toBe("2024-05-01T10:00:00Z");
@@ -109,19 +168,18 @@ describe("catalogue API", () => {
   });
 
   it("borrowBook surfaces the API's message and status", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: false,
-        status: 409,
-        json: async () => ({ error: "book already on loan" }),
-      }),
-    );
+    const conflictMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: "book already on loan" }),
+    });
+    vi.stubGlobal("fetch", conflictMock);
 
     const conflict = await borrowFailure(1);
 
     expect(conflict.message).toBe("book already on loan");
     expect(conflict.status).toBe(409);
+    expect(conflict.requestId).toBe(sentRequestId(conflictMock));
 
     vi.stubGlobal(
       "fetch",
@@ -179,7 +237,8 @@ describe("catalogue API", () => {
 
     const loans = await fetchLoans();
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/loans");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/loans");
+    expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
     expect(loans).toHaveLength(2);
     expect(loans[0].returnedAt).toBeUndefined();
     expect(loans[1].returnedAt).toBe("2024-05-10T09:30:00Z");
@@ -199,7 +258,8 @@ describe("catalogue API", () => {
 
     const loan = await fetchLoan(3);
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/loans/3");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/loans/3");
+    expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
     expect(loan.id).toBe(3);
     expect(loan.bookId).toBe(1);
   });
@@ -220,9 +280,9 @@ describe("catalogue API", () => {
 
     const returned = await returnLoan(3);
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/loans/3/return", {
-      method: "POST",
-    });
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/loans/3/return");
+    expect(sentInit(fetchMock)?.method).toBe("POST");
+    expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
     expect(returned.id).toBe(3);
     expect(returned.returnedAt).toBe("2024-05-10T09:30:00Z");
   });
@@ -273,5 +333,98 @@ describe("catalogue API", () => {
 
     expect(failure.message).toMatch(/502/);
     expect(failure.status).toBe(502);
+  });
+});
+
+describe("request ids", () => {
+  it("mints a 32-hex id that differs on every call", () => {
+    const first = newRequestId();
+    const second = newRequestId();
+
+    expect(first).toMatch(REQUEST_ID_PATTERN);
+    expect(second).toMatch(REQUEST_ID_PATTERN);
+    expect(second).not.toBe(first);
+  });
+
+  it("mints a different 32-hex id for each user action", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchBooks();
+    await fetchBooks();
+
+    const [first, second] = sentRequestIds(fetchMock);
+    expect(first).toMatch(REQUEST_ID_PATTERN);
+    expect(second).toMatch(REQUEST_ID_PATTERN);
+    expect(second).not.toBe(first);
+  });
+
+  it("sends the id it is given so a retry reuses it", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: async () => ({
+        id: 1,
+        bookId: 1,
+        borrowedAt: "2024-05-01T10:00:00Z",
+        dueAt: "2024-05-15T10:00:00Z",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const retriedId = newRequestId();
+    await borrowBook(1, retriedId);
+
+    expect(retriedId).toMatch(REQUEST_ID_PATTERN);
+    expect(sentRequestId(fetchMock)).toBe(retriedId);
+  });
+
+  it("keeps the id the gateway answered with", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      headers: new Headers({ [REQUEST_ID_HEADER]: ANSWERED_ID }),
+      json: async () => ({ error: "book already on loan" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const conflict = await borrowFailure(1);
+
+    expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
+    expect(conflict.requestId).toBe(ANSWERED_ID);
+  });
+
+  it("falls back to the id it sent when the answer carries none", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => ({ error: "catalogue unreachable" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const failure = await returnFailure(3);
+
+    const sentId = sentRequestId(fetchMock);
+    expect(sentId).toMatch(REQUEST_ID_PATTERN);
+    expect(failure.requestId).toBe(sentId);
+  });
+
+  it("shows the full id on a failed action's message", () => {
+    expect(
+      failureText(
+        new LendingError(409, "book already on loan", ANSWERED_ID),
+        "borrow failed",
+      ),
+    ).toBe(`book already on loan (Request ${ANSWERED_ID} failed)`);
+  });
+
+  it("leaves a failure without an id as it was", () => {
+    expect(failureText(new Error("network down"), "borrow failed")).toBe(
+      "network down",
+    );
+    expect(failureText("not an error", "borrow failed")).toBe("borrow failed");
   });
 });

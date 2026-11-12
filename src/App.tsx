@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { fetchBooks, fetchHealth } from "./api";
+import { failureText, fetchBooks, fetchHealth } from "./api";
 import type { Book } from "./api";
 import BookTable from "./BookTable";
 import LoansTable from "./LoansTable";
@@ -29,9 +29,7 @@ export default function App() {
       })
       .catch((reason: unknown) => {
         if (!cancelled) {
-          setBooksError(
-            reason instanceof Error ? reason.message : "catalogue unavailable",
-          );
+          setBooksError(failureText(reason, "catalogue unavailable"));
         }
       })
       .finally(() => {

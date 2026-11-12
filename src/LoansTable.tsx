@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { fetchLoans, returnLoan } from "./api";
+import { failureText, fetchLoans, returnLoan } from "./api";
 import type { Book, Loan } from "./api";
 
 // What the loan rows render; the page holds the catalogue so a title can be
@@ -45,9 +45,7 @@ export default function LoansTable(props: LoansTableProps): JSX.Element {
       })
       .catch((reason: unknown) => {
         if (!cancelled) {
-          setError(
-            reason instanceof Error ? reason.message : "loans unavailable",
-          );
+          setError(failureText(reason, "loans unavailable"));
         }
       })
       .finally(() => {
@@ -96,7 +94,7 @@ export default function LoansTable(props: LoansTableProps): JSX.Element {
     } catch (reason: unknown) {
       setRowErrors((errors) => ({
         ...errors,
-        [loanId]: reason instanceof Error ? reason.message : "return failed",
+        [loanId]: failureText(reason, "return failed"),
       }));
     } finally {
       returnInFlight.current.delete(loanId);

@@ -1,5 +1,5 @@
 import { Fragment, useRef, useState } from "react";
-import { borrowBook, fetchBook } from "./api";
+import { borrowBook, failureText, fetchBook } from "./api";
 import type { Book } from "./api";
 
 // What the catalogue rows render; App owns the fetch so a return made in the
@@ -50,9 +50,7 @@ export default function BookTable(props: BookTableProps): JSX.Element {
       }
     } catch (reason: unknown) {
       if (detailRequestId.current === requestId) {
-        setDetailError(
-          reason instanceof Error ? reason.message : "book unavailable",
-        );
+        setDetailError(failureText(reason, "book unavailable"));
       }
     } finally {
       if (detailRequestId.current === requestId) {
@@ -86,7 +84,7 @@ export default function BookTable(props: BookTableProps): JSX.Element {
     } catch (reason: unknown) {
       setRowErrors((errors) => ({
         ...errors,
-        [bookId]: reason instanceof Error ? reason.message : "borrow failed",
+        [bookId]: failureText(reason, "borrow failed"),
       }));
     } finally {
       borrowInFlight.current.delete(bookId);
