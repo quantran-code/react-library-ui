@@ -99,3 +99,33 @@ tr.error-row td {
   color: #b42318;
   font-weight: 600;
 }
+
+/* Returning a loan's copy; the button stays disabled while the request is out. */
+.loan-return-button {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid #475467;
+  border-radius: 6px;
+  background: #475467;
+  color: #ffffff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.loan-return-button:disabled {
+  border-color: #d0d5dd;
+  background: #f2f4f7;
+  color: #98a2b3;
+  cursor: not-allowed;
+}
+
+/* The date a copy came back, on a row that keeps its place in the list. */
+.loan-returned-date {
+  color: #475467;
+  font-style: italic;
+}
+
+/* The message the API returned for a refused return, under its own row. */
+.loan-row-error td {
+  color: #b42318;
+  font-weight: 600;
+}

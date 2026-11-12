@@ -1,13 +1,19 @@
-import { Fragment, useEffect, useRef, useState } from "react";
-import { borrowBook, fetchBook, fetchBooks } from "./api";
+import { Fragment, useRef, useState } from "react";
+import { borrowBook, fetchBook } from "./api";
 import type { Book } from "./api";
+
+// What the catalogue rows render; App owns the fetch so a return made in the
+// loan table can flip the same book's shelf state here.
+type BookTableProps = {
+  books: Book[] | null;
+  loading: boolean;
+  error: string | null;
+  onAvailabilityChange: (bookId: number, available: boolean) => void;
+};
 
 // The catalogue: one row per book, with a single loading or error row while the
 // gateway has nothing to show.
-export default function BookTable(): JSX.Element {
-  const [books, setBooks] = useState<Book[] | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+export default function BookTable(props: BookTableProps): JSX.Element {
   const [selectedBookId, setSelectedBookId] = useState<number | null>(null);
   const [bookDetail, setBookDetail] = useState<Book | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -24,34 +30,7 @@ export default function BookTable(): JSX.Element {
   // guard that second click meets is this ref rather than the rendered state.
   const borrowInFlight = useRef<Set<number>>(new Set());
 
-  useEffect(() => {
-    let cancelled = false;
-
-    fetchBooks()
-      .then((catalogue) => {
-        if (!cancelled) {
-          setBooks(catalogue);
-        }
-      })
-      .catch((reason: unknown) => {
-        if (!cancelled) {
-          setError(
-            reason instanceof Error ? reason.message : "catalogue unavailable",
-          );
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const bookRows = books ?? [];
+  const bookRows = props.books ?? [];
 
   // Selecting a row reads that one book through the gateway's detail route, so
   // the detail area below the table always shows what the service reports.
@@ -98,13 +77,7 @@ export default function BookTable(): JSX.Element {
 
     try {
       await borrowBook(bookId);
-      setBooks((current) =>
-        current === null
-          ? current
-          : current.map((book) =>
-              book.id === bookId ? { ...book, available: false } : book,
-            ),
-      );
+      props.onAvailabilityChange(bookId, false);
       setBookDetail((current) =>
         current !== null && current.id === bookId
           ? { ...current, available: false }
@@ -134,22 +107,22 @@ export default function BookTable(): JSX.Element {
           </tr>
         </thead>
         <tbody>
-          {loading ? (
+          {props.loading ? (
             <tr className="loading-row">
               <td colSpan={5}>Loading catalogue…</td>
             </tr>
           ) : null}
-          {!loading && error !== null ? (
+          {!props.loading && props.error !== null ? (
             <tr className="error-row">
-              <td colSpan={5}>{error}</td>
+              <td colSpan={5}>{props.error}</td>
             </tr>
           ) : null}
-          {!loading && error === null && bookRows.length === 0 ? (
+          {!props.loading && props.error === null && bookRows.length === 0 ? (
             <tr>
               <td colSpan={5}>No books in the catalogue.</td>
             </tr>
           ) : null}
-          {!loading && error === null
+          {!props.loading && props.error === null
             ? bookRows.map((book) => {
                 const rowError: string | undefined = rowErrors[book.id];
                 return (

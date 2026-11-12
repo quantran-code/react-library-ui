@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BorrowError, borrowBook, fetchBook, fetchBooks } from "./api";
+import {
+  BorrowError,
+  LendingError,
+  borrowBook,
+  fetchBook,
+  fetchBooks,
+  fetchLoan,
+  fetchLoans,
+  returnLoan,
+} from "./api";
 
 // The API module is the one place the UI builds URLs; these tests pin the paths
 // the gateway expects without needing a browser or a running service.
@@ -19,6 +28,20 @@ async function borrowFailure(bookId: number): Promise<BorrowError> {
     throw reason;
   }
   throw new Error(`borrowBook(${bookId}) did not fail`);
+}
+
+// Collects the LendingError a refused return throws, failing the test if the
+// call did not reject at all.
+async function returnFailure(loanId: number): Promise<LendingError> {
+  try {
+    await returnLoan(loanId);
+  } catch (reason: unknown) {
+    if (reason instanceof LendingError) {
+      return reason;
+    }
+    throw reason;
+  }
+  throw new Error(`returnLoan(${loanId}) did not fail`);
 }
 
 describe("catalogue API", () => {
@@ -128,6 +151,125 @@ describe("catalogue API", () => {
     );
 
     const failure = await borrowFailure(1);
+
+    expect(failure.message).toMatch(/502/);
+    expect(failure.status).toBe(502);
+  });
+
+  it("reads every loan from /api/loans", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [
+        {
+          id: 2,
+          bookId: 2,
+          borrowedAt: "2024-05-02T10:00:00Z",
+          dueAt: "2024-05-16T10:00:00Z",
+        },
+        {
+          id: 1,
+          bookId: 1,
+          borrowedAt: "2024-05-01T10:00:00Z",
+          dueAt: "2024-05-15T10:00:00Z",
+          returnedAt: "2024-05-10T09:30:00Z",
+        },
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const loans = await fetchLoans();
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/loans");
+    expect(loans).toHaveLength(2);
+    expect(loans[0].returnedAt).toBeUndefined();
+    expect(loans[1].returnedAt).toBe("2024-05-10T09:30:00Z");
+  });
+
+  it("reads one loan from /api/loans/:id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        id: 3,
+        bookId: 1,
+        borrowedAt: "2024-05-01T10:00:00Z",
+        dueAt: "2024-05-15T10:00:00Z",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const loan = await fetchLoan(3);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/loans/3");
+    expect(loan.id).toBe(3);
+    expect(loan.bookId).toBe(1);
+  });
+
+  it("returnLoan posts to /api/loans/:id/return", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 3,
+        bookId: 1,
+        borrowedAt: "2024-05-01T10:00:00Z",
+        dueAt: "2024-05-15T10:00:00Z",
+        returnedAt: "2024-05-10T09:30:00Z",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const returned = await returnLoan(3);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/loans/3/return", {
+      method: "POST",
+    });
+    expect(returned.id).toBe(3);
+    expect(returned.returnedAt).toBe("2024-05-10T09:30:00Z");
+  });
+
+  it("returnLoan surfaces the API's message and status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({ error: "loan already returned" }),
+      }),
+    );
+
+    const conflict = await returnFailure(3);
+
+    expect(conflict.message).toBe("loan already returned");
+    expect(conflict.status).toBe(409);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: "invalid loan id" }),
+      }),
+    );
+
+    const invalid = await returnFailure(0);
+
+    expect(invalid.message).toBe("invalid loan id");
+    expect(invalid.status).toBe(400);
+  });
+
+  it("returnLoan falls back to a status message for a non-JSON body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 502,
+        json: async () => {
+          throw new SyntaxError("Unexpected token < in JSON");
+        },
+      }),
+    );
+
+    const failure = await returnFailure(3);
 
     expect(failure.message).toMatch(/502/);
     expect(failure.status).toBe(502);
