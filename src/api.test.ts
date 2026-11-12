@@ -1,18 +1,25 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BorrowError,
+  ImportError,
   LendingError,
   REQUEST_ID_HEADER,
   borrowBook,
+  downloadCsv,
+  exportBooksCsv,
+  exportLoansCsv,
   failureText,
   fetchBook,
   fetchBooks,
   fetchHealth,
   fetchLoan,
   fetchLoans,
+  filenameFromDisposition,
+  importBooks,
   newRequestId,
   returnLoan,
 } from "./api";
+import type { CsvDownload } from "./api";
 
 // The API module is the one place the UI builds URLs; these tests pin the paths
 // the gateway expects and the request id every call carries, without needing a
@@ -82,6 +89,55 @@ async function returnFailure(loanId: number): Promise<LendingError> {
     throw reason;
   }
   throw new Error(`returnLoan(${loanId}) did not fail`);
+}
+
+// The CSV a file picker could have chosen; the API sends the File itself, so a
+// test can hand one in and assert the very same object came back out of the
+// multipart body.
+function csvFile(name = "books.csv"): File {
+  return new File(["title,author,available\r\nDune,Herbert,true\r\n"], name, {
+    type: "text/csv",
+  });
+}
+
+// The multipart body a stubbed fetch was called with, failing the test when the
+// call sent anything else.
+function sentFormData(fetchMock: FetchMock, callIndex = 0): FormData {
+  const body = sentInit(fetchMock, callIndex)?.body;
+  if (!(body instanceof FormData)) {
+    throw new Error(`fetch call ${callIndex} did not send FormData`);
+  }
+  return body;
+}
+
+// Collects the ImportError a refused import throws, failing the test if the
+// call did not reject at all.
+async function importFailure(file: File): Promise<ImportError> {
+  try {
+    await importBooks(file);
+  } catch (reason: unknown) {
+    if (reason instanceof ImportError) {
+      return reason;
+    }
+    throw reason;
+  }
+  throw new Error("importBooks did not fail");
+}
+
+// Collects the LendingError a refused export throws, failing the test if the
+// call did not reject at all.
+async function exportFailure(
+  exportCall: () => Promise<CsvDownload>,
+): Promise<LendingError> {
+  try {
+    await exportCall();
+  } catch (reason: unknown) {
+    if (reason instanceof LendingError) {
+      return reason;
+    }
+    throw reason;
+  }
+  throw new Error("the export did not fail");
 }
 
 // The URL a stubbed fetch was called with, parsed so its path and query can be
@@ -436,6 +492,304 @@ describe("catalogue API", () => {
 
     expect(failure.message).toMatch(/502/);
     expect(failure.status).toBe(502);
+  });
+
+  describe("importBooks", () => {
+    it("posts the CSV to /api/books/import as one file part", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: async () => ({ imported: 2, skipped: 1 }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const file = csvFile();
+      const result = await importBooks(file);
+
+      expect(fetchMock.mock.calls).toHaveLength(1);
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/books/import");
+      expect(sentInit(fetchMock)?.method).toBe("POST");
+      // The browser writes the multipart Content-Type, boundary and all, so the
+      // module must not set one of its own.
+      expect(
+        new Headers(sentInit(fetchMock)?.headers).has("Content-Type"),
+      ).toBe(false);
+      expect(sentFormData(fetchMock).get("file")).toBe(file);
+      expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
+      expect(result.imported).toBe(2);
+      expect(result.skipped).toBe(1);
+    });
+
+    it("surfaces an invalid import file with its row errors", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          error: "invalid import file",
+          rows: [
+            { line: 3, error: "author is required" },
+            { line: 5, error: "available must be true, false, 1 or 0" },
+          ],
+          more: false,
+        }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const failure = await importFailure(csvFile());
+
+      expect(failure).toBeInstanceOf(LendingError);
+      expect(failure.message).toBe("invalid import file");
+      expect(failure.status).toBe(400);
+      expect(failure.rows).toEqual([
+        { line: 3, error: "author is required" },
+        { line: 5, error: "available must be true, false, 1 or 0" },
+      ]);
+      expect(failure.more).toBe(false);
+      expect(failure.requestId).toMatch(REQUEST_ID_PATTERN);
+      expect(failure.requestId).toBe(sentRequestId(fetchMock));
+    });
+
+    it("reads more as false when the body omits the flag", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 400,
+          json: async () => ({
+            error: "invalid import file",
+            rows: [{ line: 2, error: "title is required" }],
+          }),
+        }),
+      );
+
+      const failure = await importFailure(csvFile());
+
+      expect(failure.rows).toEqual([{ line: 2, error: "title is required" }]);
+      expect(failure.more).toBe(false);
+    });
+
+    it("keeps more true when the service capped its row list", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 400,
+          json: async () => ({
+            error: "invalid import file",
+            rows: [{ line: 2, error: "title is required" }],
+            more: true,
+          }),
+        }),
+      );
+
+      const failure = await importFailure(csvFile());
+
+      expect(failure.more).toBe(true);
+    });
+
+    it("surfaces a 415 and a 413 with the API's own message and no rows", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 415,
+          json: async () => ({ error: "unsupported file type" }),
+        }),
+      );
+
+      const unsupported = await importFailure(csvFile("books.txt"));
+
+      expect(unsupported.message).toBe("unsupported file type");
+      expect(unsupported.status).toBe(415);
+      expect(unsupported.rows).toEqual([]);
+      expect(unsupported.more).toBe(false);
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 413,
+          json: async () => ({ error: "file too large" }),
+        }),
+      );
+
+      const tooLarge = await importFailure(csvFile());
+
+      expect(tooLarge.message).toBe("file too large");
+      expect(tooLarge.status).toBe(413);
+      expect(tooLarge.rows).toEqual([]);
+    });
+  });
+
+  describe("exportBooksCsv", () => {
+    it("downloads the blob from /api/books/export under its header name", async () => {
+      const blob = new Blob(["id,title,author,available\r\n"], {
+        type: "text/csv; charset=utf-8",
+      });
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": 'attachment; filename="catalogue-2024.csv"',
+        }),
+        blob: async () => blob,
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const download = await exportBooksCsv();
+
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/books/export");
+      expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
+      // The very blob the answer carried, never a CSV rebuilt from the rows.
+      expect(download.blob).toBe(blob);
+      expect(download.filename).toBe("catalogue-2024.csv");
+    });
+
+    it("falls back to books.csv when the answer names no file", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          headers: new Headers({ "Content-Type": "text/csv; charset=utf-8" }),
+          blob: async () => new Blob([""], { type: "text/csv; charset=utf-8" }),
+        }),
+      );
+
+      const download = await exportBooksCsv();
+
+      expect(download.filename).toBe("books.csv");
+    });
+
+    it("rejects with the API's message and reads no blob", async () => {
+      const blob = vi.fn();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 502,
+          json: async () => ({ error: "catalogue unreachable" }),
+          blob,
+        }),
+      );
+
+      const failure = await exportFailure(exportBooksCsv);
+
+      expect(failure.message).toBe("catalogue unreachable");
+      expect(failure.status).toBe(502);
+      expect(blob).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("exportLoansCsv", () => {
+    it("downloads the blob from /api/loans/export under its header name", async () => {
+      const blob = new Blob(["id,bookId,borrowedAt,dueAt,returnedAt\r\n"], {
+        type: "text/csv; charset=utf-8",
+      });
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": 'attachment; filename="loans.csv"',
+        }),
+        blob: async () => blob,
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const download = await exportLoansCsv();
+
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/loans/export");
+      expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
+      expect(download.blob).toBe(blob);
+      expect(download.filename).toBe("loans.csv");
+    });
+
+    it("falls back to loans.csv when the header names no file", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          headers: new Headers({ "Content-Type": "text/csv; charset=utf-8" }),
+          blob: async () => new Blob([""], { type: "text/csv; charset=utf-8" }),
+        }),
+      );
+
+      const download = await exportLoansCsv();
+
+      expect(download.filename).toBe("loans.csv");
+    });
+
+    it("rejects with the API's message and reads no blob", async () => {
+      const blob = vi.fn();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 502,
+          json: async () => ({ error: "loans unreachable" }),
+          blob,
+        }),
+      );
+
+      const failure = await exportFailure(exportLoansCsv);
+
+      expect(failure.message).toBe("loans unreachable");
+      expect(failure.status).toBe(502);
+      expect(blob).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("filenameFromDisposition", () => {
+  it("reads a quoted and a bare filename", () => {
+    expect(
+      filenameFromDisposition('attachment; filename="books.csv"', "fallback"),
+    ).toBe("books.csv");
+    expect(
+      filenameFromDisposition("attachment; filename=loans.csv", "fallback"),
+    ).toBe("loans.csv");
+  });
+
+  it("falls back when the header names no file", () => {
+    expect(filenameFromDisposition(null, "books.csv")).toBe("books.csv");
+    expect(filenameFromDisposition("attachment", "loans.csv")).toBe("loans.csv");
+    expect(
+      filenameFromDisposition('attachment; filename=""', "loans.csv"),
+    ).toBe("loans.csv");
+  });
+});
+
+describe("downloadCsv", () => {
+  it("saves the blob it was handed under its filename", () => {
+    const blob = new Blob(["id,title,author,available\r\n"], {
+      type: "text/csv; charset=utf-8",
+    });
+    const click = vi.fn();
+    const remove = vi.fn();
+    const appendChild = vi.fn();
+    const anchor = { href: "", download: "", click, remove };
+    vi.stubGlobal("document", {
+      createElement: vi.fn(() => anchor),
+      body: { appendChild },
+    });
+    const createObjectURL = vi.fn(() => "blob:library-download");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+
+    downloadCsv({ blob, filename: "books.csv" });
+
+    // The blob is handed to the browser as it arrived, so nothing re-serialises
+    // the CSV text on the way out.
+    expect(createObjectURL).toHaveBeenCalledWith(blob);
+    expect(anchor.href).toBe("blob:library-download");
+    expect(anchor.download).toBe("books.csv");
+    expect(appendChild).toHaveBeenCalledWith(anchor);
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:library-download");
   });
 });
 

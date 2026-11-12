@@ -130,6 +130,74 @@ tr.error-row td {
   outline-offset: 1px;
 }
 
+/* The import and export controls above the table: the file picker, the Import
+   button and the Export books button, which keeps the table's own rows. */
+.catalogue-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.catalogue-tools label {
+  font-weight: 600;
+}
+
+.catalogue-tools input[type="file"] {
+  font: inherit;
+}
+
+.catalogue-import-button {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid #1d4ed8;
+  border-radius: 6px;
+  background: #1d4ed8;
+  color: #ffffff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.catalogue-export-button {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid #475467;
+  border-radius: 6px;
+  background: #475467;
+  color: #ffffff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.catalogue-import-button:disabled,
+.catalogue-export-button:disabled {
+  border-color: #d0d5dd;
+  background: #f2f4f7;
+  color: #98a2b3;
+  cursor: not-allowed;
+}
+
+/* What the import answered: the counts it imported and skipped, or the API's
+   own wording for a refusal. */
+.catalogue-tools-status {
+  margin: 0.5rem 0 0;
+  color: #475467;
+}
+
+.catalogue-tools-error {
+  margin: 0.5rem 0 0;
+  color: #b42318;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* One entry per row the import refused, each naming the line it starts on. */
+.catalogue-tools-rows {
+  margin: 0.5rem 0 0;
+  padding-left: 1.25rem;
+  color: #b42318;
+  overflow-wrap: anywhere;
+}
+
 /* The pager below the table: the page label between Previous and Next. */
 .pager {
   display: flex;
@@ -185,6 +253,41 @@ tr.error-row td {
 
 /* The message the API returned for a refused return, under its own row. */
 .loan-row-error td {
+  color: #b42318;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* The export control above the loans table, which keeps the loan rows as they
+   are while the CSV is fetched. */
+.loans-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+}
+
+.loans-export-button {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid #475467;
+  border-radius: 6px;
+  background: #475467;
+  color: #ffffff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.loans-export-button:disabled {
+  border-color: #d0d5dd;
+  background: #f2f4f7;
+  color: #98a2b3;
+  cursor: not-allowed;
+}
+
+/* The API's wording for a refused loans export, which starts no download. */
+.loans-export-error {
+  margin: 0.5rem 0 0;
   color: #b42318;
   font-weight: 600;
   overflow-wrap: anywhere;

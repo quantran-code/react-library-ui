@@ -1,6 +1,14 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { borrowBook, failureText, fetchBook } from "./api";
-import type { Book, BookPage } from "./api";
+import {
+  borrowBook,
+  downloadCsv,
+  exportBooksCsv,
+  failureText,
+  fetchBook,
+  importBooks,
+  ImportError,
+} from "./api";
+import type { Book, BookPage, ImportRowError } from "./api";
 import {
   canGoNext,
   canGoPrevious,
@@ -24,6 +32,9 @@ type BookTableProps = {
   onPrevious: () => void;
   onNext: () => void;
   onAvailabilityChange: (bookId: number, available: boolean) => void;
+  // Called after an import was accepted, so the page can empty the search, go
+  // back to page 1 and read the catalogue again for the books just added.
+  onImported: () => void;
 };
 
 // The catalogue: one row per book on the current page, with a single loading or
@@ -45,6 +56,22 @@ export default function BookTable(props: BookTableProps): JSX.Element {
   // A double click can land before React re-renders the disabled button, so the
   // guard that second click meets is this ref rather than the rendered state.
   const borrowInFlight = useRef<Set<number>>(new Set());
+  // The file the librarian picked; the Import button stays disabled until one is
+  // chosen, and one click sends that one file as the request's only file part.
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importing, setImporting] = useState(false);
+  // What the import answered: the counts on success, the API's own refusal
+  // otherwise, shown beside the controls so the table keeps its rows.
+  const [importMessage, setImportMessage] = useState<string | null>(null);
+  // One entry per record the service refused, each carrying the 1-based line the
+  // record starts on; the service caps the list it sends at 20 entries.
+  const [importRowErrors, setImportRowErrors] = useState<ImportRowError[]>([]);
+  const [exportingBooks, setExportingBooks] = useState(false);
+  // The API's wording for a refused books export, which starts no download.
+  const [booksExportError, setBooksExportError] = useState<string | null>(null);
+  // The same double-click guards as the borrow button, one per control.
+  const importInFlight = useRef(false);
+  const exportBooksInFlight = useRef(false);
 
   const catalogue = props.catalogue;
   const bookRows = catalogue?.items ?? [];
@@ -123,6 +150,55 @@ export default function BookTable(props: BookTableProps): JSX.Element {
     }
   }
 
+  // Importing sends the chosen file as the one file part the service takes, then
+  // asks the page to read the catalogue again so the new books are listed. A
+  // refusal lists the rows it could not take here and leaves the rows on screen,
+  // the pager and the detail section exactly as they were.
+  async function handleImport(): Promise<void> {
+    if (importFile === null || importInFlight.current) {
+      return;
+    }
+    importInFlight.current = true;
+    setImporting(true);
+    setImportMessage(null);
+    setImportRowErrors([]);
+
+    try {
+      const result = await importBooks(importFile);
+      setImportMessage(
+        `Imported ${result.imported} books, skipped ${result.skipped}`,
+      );
+      props.onImported();
+    } catch (reason: unknown) {
+      setImportMessage(failureText(reason, "import failed"));
+      setImportRowErrors(reason instanceof ImportError ? reason.rows : []);
+    } finally {
+      importInFlight.current = false;
+      setImporting(false);
+    }
+  }
+
+  // Exporting hands the CSV the service rendered to the browser as it arrived,
+  // so nothing here rebuilds it; a refusal shows the API's message and never
+  // starts a download, so no empty or partial file can be saved.
+  async function handleExportBooks(): Promise<void> {
+    if (exportBooksInFlight.current) {
+      return;
+    }
+    exportBooksInFlight.current = true;
+    setExportingBooks(true);
+    setBooksExportError(null);
+
+    try {
+      downloadCsv(await exportBooksCsv());
+    } catch (reason: unknown) {
+      setBooksExportError(failureText(reason, "books export failed"));
+    } finally {
+      exportBooksInFlight.current = false;
+      setExportingBooks(false);
+    }
+  }
+
   // The empty catalogue reads differently from a search that matched nothing, so
   // the wording comes from the query the rows were fetched for. A refusal shows
   // the API's own message instead, never an empty list.
@@ -143,6 +219,46 @@ export default function BookTable(props: BookTableProps): JSX.Element {
           onChange={(event) => props.onSearchChange(event.target.value)}
         />
       </div>
+      <div className="catalogue-tools">
+        <label htmlFor="catalogue-import-file">Import CSV</label>
+        <input
+          id="catalogue-import-file"
+          type="file"
+          accept=".csv"
+          onChange={(event) => setImportFile(event.target.files?.[0] ?? null)}
+        />
+        <button
+          type="button"
+          className="catalogue-import-button"
+          disabled={importFile === null || importing}
+          onClick={handleImport}
+        >
+          Import
+        </button>
+        <button
+          type="button"
+          className="catalogue-export-button"
+          disabled={exportingBooks}
+          onClick={handleExportBooks}
+        >
+          Export books
+        </button>
+      </div>
+      {importMessage !== null ? (
+        <p className="catalogue-tools-status">{importMessage}</p>
+      ) : null}
+      {importRowErrors.length > 0 ? (
+        <ul className="catalogue-tools-rows">
+          {importRowErrors.slice(0, 20).map((row) => (
+            <li key={`${row.line}:${row.error}`}>
+              line {row.line}: {row.error}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {booksExportError !== null ? (
+        <p className="catalogue-tools-error">{booksExportError}</p>
+      ) : null}
       <table>
         <thead>
           <tr>

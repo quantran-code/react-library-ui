@@ -75,6 +75,71 @@ export class BorrowError extends LendingError {
   }
 }
 
+// What a successful import answered: the rows that became books and the rows
+// that were skipped as duplicates.
+export type ImportResult = {
+  imported: number;
+  skipped: number;
+};
+
+// One row the service refused, as an import body reports it: the 1-based line
+// the record starts on in the uploaded file, and why that row did not import.
+export type ImportRowError = {
+  line: number;
+  error: string;
+};
+
+// A refused import carries the rows it could not take, so the catalogue page
+// can list each one beside the controls instead of replacing the table. A
+// refusal that is not about rows (415, 413) has no rows and more is false.
+export class ImportError extends LendingError {
+  readonly rows: ImportRowError[];
+  // True when the service capped the list it sent, so the page can say the
+  // list of rows is not the whole story.
+  readonly more: boolean;
+
+  constructor(
+    status: number,
+    message: string,
+    requestId: string,
+    rows: ImportRowError[],
+    more: boolean,
+  ) {
+    super(status, message, requestId);
+    this.name = "ImportError";
+    this.rows = rows;
+    this.more = more;
+  }
+}
+
+// An export answer: the CSV exactly as the service rendered it, kept as the
+// blob that arrived so nothing in the browser re-serialises it, plus the name
+// its Content-Disposition asked for.
+export type CsvDownload = {
+  blob: Blob;
+  filename: string;
+};
+
+// The name an export is saved under: the one its Content-Disposition carries,
+// or the caller's fallback when the header is missing or names no file.
+export function filenameFromDisposition(
+  header: string | null,
+  fallback: string,
+): string {
+  if (header === null) {
+    return fallback;
+  }
+  const quoted = /filename="([^"]*)"/i.exec(header);
+  if (quoted !== null && quoted[1] !== "") {
+    return quoted[1];
+  }
+  const bare = /filename=(?!")([^;]+)/i.exec(header);
+  if (bare !== null && bare[1].trim() !== "") {
+    return bare[1].trim();
+  }
+  return fallback;
+}
+
 // One place turns a refused answer into a message: the API sends its wording in
 // an `error` field, and a body that is not JSON falls back to the status.
 async function failureMessage(
@@ -108,10 +173,11 @@ export function failureText(reason: unknown, fallback: string): string {
   return reason instanceof Error ? reason.message : fallback;
 }
 
-// The single exit every request takes: it mints an id unless the caller is
-// retrying the same action with the id it already used, sends it as
-// X-Request-Id and keeps whatever id came back so a failure can report it.
-async function sendRequest(
+// The io every request takes: it mints an id unless the caller is retrying the
+// same action with the id it already used, sends it as X-Request-Id and hands
+// the answer back whatever its status, so a caller that needs the failure body
+// (the import's per-row reasons) can read it instead of losing it.
+async function dispatch(
   path: string,
   action: string,
   init?: RequestInit,
@@ -121,7 +187,20 @@ async function sendRequest(
   const headers = new Headers(init?.headers);
   headers.set(REQUEST_ID_HEADER, sentId);
 
-  const response = await fetch(path, { ...init, headers });
+  return fetch(path, { ...init, headers });
+}
+
+// The single exit every request takes that has nothing to read out of a
+// refusal: it sends through dispatch and keeps whatever id came back, so a
+// failure can report the id the log lines of that action are keyed on.
+async function sendRequest(
+  path: string,
+  action: string,
+  init?: RequestInit,
+  requestId?: string,
+): Promise<Response> {
+  const sentId = requestId ?? newRequestId();
+  const response = await dispatch(path, action, init, sentId);
   if (!response.ok) {
     const answeredId = response.headers?.get(REQUEST_ID_HEADER) ?? "";
     throw new LendingError(
@@ -210,6 +289,89 @@ export async function borrowBook(
   return (await response.json()) as Loan;
 }
 
+// The per-row reasons a refused import listed, ignoring anything shaped
+// differently so a body from a hop that carries no rows still reads cleanly.
+function importRowErrors(value: unknown): ImportRowError[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const entries: unknown[] = value;
+  const rows: ImportRowError[] = [];
+  for (const entry of entries) {
+    if (
+      typeof entry === "object" &&
+      entry !== null &&
+      "line" in entry &&
+      typeof entry.line === "number" &&
+      "error" in entry &&
+      typeof entry.error === "string"
+    ) {
+      rows.push({ line: entry.line, error: entry.error });
+    }
+  }
+  return rows;
+}
+
+// A refused import is read once, because the error is built from its body: the
+// API's wording, the rows it could not take and whether that list was capped.
+async function readImportFailure(
+  response: Response,
+  sentId: string,
+): Promise<ImportError> {
+  let message = `import answered ${response.status}`;
+  let rows: ImportRowError[] = [];
+  let more = false;
+
+  try {
+    const body: unknown = await response.json();
+    if (typeof body === "object" && body !== null) {
+      if ("error" in body && typeof body.error === "string") {
+        message = body.error;
+      }
+      if ("rows" in body) {
+        rows = importRowErrors(body.rows);
+      }
+      if ("more" in body && typeof body.more === "boolean") {
+        more = body.more;
+      }
+    }
+  } catch {
+    // A body that is not JSON keeps the status message above.
+  }
+
+  const answeredId = response.headers?.get(REQUEST_ID_HEADER) ?? "";
+  return new ImportError(
+    response.status,
+    message,
+    answeredId === "" ? sentId : answeredId,
+    rows,
+    more,
+  );
+}
+
+// Importing the catalogue: POST /api/books/import takes exactly one CSV file
+// part. The browser writes the multipart Content-Type and its boundary itself,
+// so none is set here, and the id is minted here so a refusal can report it.
+export async function importBooks(
+  file: File,
+  requestId?: string,
+): Promise<ImportResult> {
+  const sentId = requestId ?? newRequestId();
+  const body = new FormData();
+  body.append("file", file);
+
+  const response = await dispatch(
+    `${BASE_URL}/api/books/import`,
+    "import",
+    { method: "POST", body },
+    sentId,
+  );
+  if (!response.ok) {
+    throw await readImportFailure(response, sentId);
+  }
+  return (await response.json()) as ImportResult;
+}
+
 // The loans on record, newest first; the service answers [] when there are none.
 export async function fetchLoans(requestId?: string): Promise<Loan[]> {
   const response = await sendRequest(
@@ -247,4 +409,66 @@ export async function returnLoan(
     requestId,
   );
   return (await response.json()) as Loan;
+}
+
+// The names the two exports are saved under when the answer carries no
+// Content-Disposition of its own.
+const BOOKS_EXPORT_FILENAME = "books.csv";
+const LOANS_EXPORT_FILENAME = "loans.csv";
+
+// One export read: the service renders the CSV, so the answer is kept as the
+// blob that arrived and only the name to save it under is read here. A refusal
+// throws the LendingError every error surface renders, so a failed export can
+// never be turned into a download.
+async function csvDownload(
+  path: string,
+  action: string,
+  fallbackFilename: string,
+  requestId?: string,
+): Promise<CsvDownload> {
+  const response = await sendRequest(path, action, undefined, requestId);
+  return {
+    blob: await response.blob(),
+    filename: filenameFromDisposition(
+      response.headers?.get("Content-Disposition") ?? null,
+      fallbackFilename,
+    ),
+  };
+}
+
+// The catalogue as a CSV the service rendered; every book, in id order.
+export async function exportBooksCsv(
+  requestId?: string,
+): Promise<CsvDownload> {
+  return csvDownload(
+    `${BASE_URL}/api/books/export`,
+    "books export",
+    BOOKS_EXPORT_FILENAME,
+    requestId,
+  );
+}
+
+// The loan records as a CSV the service rendered, newest loan first.
+export async function exportLoansCsv(
+  requestId?: string,
+): Promise<CsvDownload> {
+  return csvDownload(
+    `${BASE_URL}/api/loans/export`,
+    "loans export",
+    LOANS_EXPORT_FILENAME,
+    requestId,
+  );
+}
+
+// Saving a download: the blob the service sent is handed straight to the
+// browser, so the CSV text is never parsed, rebuilt or re-serialised here.
+export function downloadCsv(download: CsvDownload): void {
+  const url = URL.createObjectURL(download.blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = download.filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }

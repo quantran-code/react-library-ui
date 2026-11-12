@@ -19,6 +19,10 @@ export default function App() {
   const [catalogue, setCatalogue] = useState<BookPage | null>(null);
   const [catalogueLoading, setCatalogueLoading] = useState(true);
   const [catalogueError, setCatalogueError] = useState<string | null>(null);
+  // Bumped after a successful import so the catalogue is read again; a reset to
+  // page 1 with a blank search changes nothing on its own when that is where
+  // the page already was, so the token is what asks for the new rows.
+  const [catalogueReloadToken, setCatalogueReloadToken] = useState(0);
   // A slow answer for an old page or search must not overwrite a newer one, so
   // only the newest request sequence may write the catalogue, error and loading.
   const requestSequence = useRef(0);
@@ -67,7 +71,7 @@ export default function App() {
           setCatalogueLoading(false);
         }
       });
-  }, [page, query]);
+  }, [page, query, catalogueReloadToken]);
 
   // A borrow or a return changes one book's shelf state; the page holds the
   // catalogue, so one update keeps both tables in step without a refetch.
@@ -86,6 +90,17 @@ export default function App() {
     },
     [],
   );
+
+  // A successful import has added books the search on screen would not show, so
+  // the search box is emptied and the pager returns to page 1; the token makes
+  // the effect above read the catalogue again even when page 1 and a blank
+  // search were what the page already showed.
+  const handleImported = useCallback((): void => {
+    setSearchValue("");
+    setQuery("");
+    setPage(1);
+    setCatalogueReloadToken((current) => current + 1);
+  }, []);
 
   // The pager's buttons are disabled at both ends, but a click can land before
   // the render that disables it, so the handlers guard the page as well.
@@ -117,6 +132,7 @@ export default function App() {
         onPrevious={handlePrevious}
         onNext={handleNext}
         onAvailabilityChange={applyAvailability}
+        onImported={handleImported}
       />
       <LoansTable
         books={catalogue?.items ?? []}

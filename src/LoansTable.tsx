@@ -1,5 +1,11 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { failureText, fetchLoans, returnLoan } from "./api";
+import {
+  downloadCsv,
+  exportLoansCsv,
+  failureText,
+  fetchLoans,
+  returnLoan,
+} from "./api";
 import type { Book, Loan } from "./api";
 
 // What the loan rows render; the page holds the catalogue so a title can be
@@ -33,6 +39,11 @@ export default function LoansTable(props: LoansTableProps): JSX.Element {
   // A double click can land before React re-renders the disabled button, so the
   // guard that second click meets is this ref rather than the rendered state.
   const returnInFlight = useRef<Set<number>>(new Set());
+  const [exportingLoans, setExportingLoans] = useState(false);
+  // The API's wording for a refused loans export, which starts no download.
+  const [loansExportError, setLoansExportError] = useState<string | null>(null);
+  // The same guard for the export button, so a second click sends nothing.
+  const exportLoansInFlight = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -102,72 +113,108 @@ export default function LoansTable(props: LoansTableProps): JSX.Element {
     }
   }
 
+  // Exporting hands the CSV the loan service rendered to the browser as it
+  // arrived; a refusal shows the API's message and never starts a download, so
+  // no empty or partial file can be saved.
+  async function handleExportLoans(): Promise<void> {
+    if (exportLoansInFlight.current) {
+      return;
+    }
+    exportLoansInFlight.current = true;
+    setExportingLoans(true);
+    setLoansExportError(null);
+
+    try {
+      downloadCsv(await exportLoansCsv());
+    } catch (reason: unknown) {
+      setLoansExportError(failureText(reason, "loans export failed"));
+    } finally {
+      exportLoansInFlight.current = false;
+      setExportingLoans(false);
+    }
+  }
+
   return (
-    <table>
-      <thead>
-        <tr>
-          <th>Book</th>
-          <th>Borrowed</th>
-          <th>Due</th>
-          <th>Returned</th>
-          <th>Return</th>
-        </tr>
-      </thead>
-      <tbody>
-        {loading ? (
-          <tr className="loading-row">
-            <td colSpan={5}>Loading loans…</td>
-          </tr>
-        ) : null}
-        {!loading && error !== null ? (
-          <tr className="error-row">
-            <td colSpan={5}>{error}</td>
-          </tr>
-        ) : null}
-        {!loading && error === null && loanRows.length === 0 ? (
+    <>
+      <div className="loans-tools">
+        <button
+          type="button"
+          className="loans-export-button"
+          disabled={exportingLoans}
+          onClick={handleExportLoans}
+        >
+          Export loans
+        </button>
+      </div>
+      {loansExportError !== null ? (
+        <p className="loans-export-error">{loansExportError}</p>
+      ) : null}
+      <table>
+        <thead>
           <tr>
-            <td colSpan={5}>No loans on record.</td>
+            <th>Book</th>
+            <th>Borrowed</th>
+            <th>Due</th>
+            <th>Returned</th>
+            <th>Return</th>
           </tr>
-        ) : null}
-        {!loading && error === null
-          ? loanRows.map((loan) => {
-              const rowError: string | undefined = rowErrors[loan.id];
-              return (
-                <Fragment key={loan.id}>
-                  <tr className="loan-row">
-                    <td>{bookTitle(loan.bookId)}</td>
-                    <td>{formatDate(loan.borrowedAt)}</td>
-                    <td>{formatDate(loan.dueAt)}</td>
-                    <td>
-                      {loan.returnedAt === undefined ? null : (
-                        <span className="loan-returned-date">
-                          {formatDate(loan.returnedAt)}
-                        </span>
-                      )}
-                    </td>
-                    <td>
-                      {loan.returnedAt === undefined ? (
-                        <button
-                          type="button"
-                          className="loan-return-button"
-                          disabled={returningIds.includes(loan.id)}
-                          onClick={() => handleReturn(loan.id)}
-                        >
-                          Return
-                        </button>
-                      ) : null}
-                    </td>
-                  </tr>
-                  {rowError !== undefined ? (
-                    <tr className="loan-row-error">
-                      <td colSpan={5}>{rowError}</td>
+        </thead>
+        <tbody>
+          {loading ? (
+            <tr className="loading-row">
+              <td colSpan={5}>Loading loans…</td>
+            </tr>
+          ) : null}
+          {!loading && error !== null ? (
+            <tr className="error-row">
+              <td colSpan={5}>{error}</td>
+            </tr>
+          ) : null}
+          {!loading && error === null && loanRows.length === 0 ? (
+            <tr>
+              <td colSpan={5}>No loans on record.</td>
+            </tr>
+          ) : null}
+          {!loading && error === null
+            ? loanRows.map((loan) => {
+                const rowError: string | undefined = rowErrors[loan.id];
+                return (
+                  <Fragment key={loan.id}>
+                    <tr className="loan-row">
+                      <td>{bookTitle(loan.bookId)}</td>
+                      <td>{formatDate(loan.borrowedAt)}</td>
+                      <td>{formatDate(loan.dueAt)}</td>
+                      <td>
+                        {loan.returnedAt === undefined ? null : (
+                          <span className="loan-returned-date">
+                            {formatDate(loan.returnedAt)}
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        {loan.returnedAt === undefined ? (
+                          <button
+                            type="button"
+                            className="loan-return-button"
+                            disabled={returningIds.includes(loan.id)}
+                            onClick={() => handleReturn(loan.id)}
+                          >
+                            Return
+                          </button>
+                        ) : null}
+                      </td>
                     </tr>
-                  ) : null}
-                </Fragment>
-              );
-            })
-          : null}
-      </tbody>
-    </table>
+                    {rowError !== undefined ? (
+                      <tr className="loan-row-error">
+                        <td colSpan={5}>{rowError}</td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
+                );
+              })
+            : null}
+        </tbody>
+      </table>
+    </>
   );
 }
