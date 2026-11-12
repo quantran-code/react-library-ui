@@ -1,18 +1,34 @@
-import { Fragment, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { borrowBook, failureText, fetchBook } from "./api";
-import type { Book } from "./api";
+import type { Book, BookPage } from "./api";
+import {
+  canGoNext,
+  canGoPrevious,
+  catalogueEmptyMessage,
+  pageLabel,
+} from "./paging";
 
 // What the catalogue rows render; App owns the fetch so a return made in the
-// loan table can flip the same book's shelf state here.
+// loan table can flip the same book's shelf state here. The whole page envelope
+// arrives, not just its rows, because the pager is derived from its total and
+// must keep describing the rows actually on screen.
 type BookTableProps = {
-  books: Book[] | null;
+  catalogue: BookPage | null;
+  // The search the rows on screen answer, and what the search box shows while
+  // it is being typed.
+  query: string;
+  searchValue: string;
   loading: boolean;
   error: string | null;
+  onSearchChange: (value: string) => void;
+  onPrevious: () => void;
+  onNext: () => void;
   onAvailabilityChange: (bookId: number, available: boolean) => void;
 };
 
-// The catalogue: one row per book, with a single loading or error row while the
-// gateway has nothing to show.
+// The catalogue: one row per book on the current page, with a single loading or
+// error row while the gateway has nothing to show, the search box above it and
+// the pager below.
 export default function BookTable(props: BookTableProps): JSX.Element {
   const [selectedBookId, setSelectedBookId] = useState<number | null>(null);
   const [bookDetail, setBookDetail] = useState<Book | null>(null);
@@ -30,7 +46,22 @@ export default function BookTable(props: BookTableProps): JSX.Element {
   // guard that second click meets is this ref rather than the rendered state.
   const borrowInFlight = useRef<Set<number>>(new Set());
 
-  const bookRows = props.books ?? [];
+  const catalogue = props.catalogue;
+  const bookRows = catalogue?.items ?? [];
+  const currentPage = catalogue?.page ?? 1;
+
+  // A page or search change makes the selection and every row's borrow error
+  // describe rows that are no longer on screen, so both are dropped; the detail
+  // request id is bumped so a read still in flight for the old selection cannot
+  // repopulate the detail section when it answers.
+  useEffect(() => {
+    detailRequestId.current += 1;
+    setSelectedBookId(null);
+    setBookDetail(null);
+    setDetailError(null);
+    setDetailLoading(false);
+    setRowErrors({});
+  }, [catalogue?.page, props.query]);
 
   // Selecting a row reads that one book through the gateway's detail route, so
   // the detail area below the table always shows what the service reports.
@@ -92,8 +123,26 @@ export default function BookTable(props: BookTableProps): JSX.Element {
     }
   }
 
+  // The empty catalogue reads differently from a search that matched nothing, so
+  // the wording comes from the query the rows were fetched for. A refusal shows
+  // the API's own message instead, never an empty list.
+  const emptyMessage =
+    props.error === null && !props.loading && catalogue !== null
+      ? catalogueEmptyMessage(catalogue.total, props.query)
+      : null;
+
   return (
     <>
+      <div className="catalogue-search">
+        <label htmlFor="catalogue-search-input">Search the catalogue</label>
+        <input
+          id="catalogue-search-input"
+          type="search"
+          value={props.searchValue}
+          placeholder="Title or author"
+          onChange={(event) => props.onSearchChange(event.target.value)}
+        />
+      </div>
       <table>
         <thead>
           <tr>
@@ -105,69 +154,93 @@ export default function BookTable(props: BookTableProps): JSX.Element {
           </tr>
         </thead>
         <tbody>
-          {props.loading ? (
+          {props.loading && bookRows.length === 0 ? (
             <tr className="loading-row">
               <td colSpan={5}>Loading catalogue…</td>
             </tr>
           ) : null}
-          {!props.loading && props.error !== null ? (
+          {props.error !== null ? (
             <tr className="error-row">
               <td colSpan={5}>{props.error}</td>
             </tr>
           ) : null}
-          {!props.loading && props.error === null && bookRows.length === 0 ? (
+          {emptyMessage !== null ? (
             <tr>
-              <td colSpan={5}>No books in the catalogue.</td>
+              <td colSpan={5}>{emptyMessage}</td>
             </tr>
           ) : null}
-          {!props.loading && props.error === null
-            ? bookRows.map((book) => {
-                const rowError: string | undefined = rowErrors[book.id];
-                return (
-                  <Fragment key={book.id}>
-                    <tr
-                      className={
-                        book.id === selectedBookId
-                          ? "book-row selected"
-                          : "book-row"
-                      }
+          {bookRows.map((book) => {
+            const rowError: string | undefined = rowErrors[book.id];
+            return (
+              <Fragment key={book.id}>
+                <tr
+                  className={
+                    book.id === selectedBookId
+                      ? "book-row selected"
+                      : "book-row"
+                  }
+                >
+                  <td>{book.id}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="book-select"
+                      onClick={() => handleSelect(book.id)}
                     >
-                      <td>{book.id}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="book-select"
-                          onClick={() => handleSelect(book.id)}
-                        >
-                          {book.title}
-                        </button>
-                      </td>
-                      <td>{book.author}</td>
-                      <td>{book.available ? "Yes" : "No"}</td>
-                      <td>
-                        {book.available ? (
-                          <button
-                            type="button"
-                            className="borrow-button"
-                            disabled={borrowingIds.includes(book.id)}
-                            onClick={() => handleBorrow(book.id)}
-                          >
-                            Borrow
-                          </button>
-                        ) : null}
-                      </td>
-                    </tr>
-                    {rowError !== undefined ? (
-                      <tr className="borrow-error-row">
-                        <td colSpan={5}>{rowError}</td>
-                      </tr>
+                      {book.title}
+                    </button>
+                  </td>
+                  <td>{book.author}</td>
+                  <td>{book.available ? "Yes" : "No"}</td>
+                  <td>
+                    {book.available ? (
+                      <button
+                        type="button"
+                        className="borrow-button"
+                        disabled={borrowingIds.includes(book.id)}
+                        onClick={() => handleBorrow(book.id)}
+                      >
+                        Borrow
+                      </button>
                     ) : null}
-                  </Fragment>
-                );
-              })
-            : null}
+                  </td>
+                </tr>
+                {rowError !== undefined ? (
+                  <tr className="borrow-error-row">
+                    <td colSpan={5}>{rowError}</td>
+                  </tr>
+                ) : null}
+              </Fragment>
+            );
+          })}
         </tbody>
       </table>
+      {catalogue !== null && catalogue.total > 0 ? (
+        <div className="pager">
+          <button
+            type="button"
+            className="pager-button"
+            disabled={props.loading || !canGoPrevious(currentPage)}
+            onClick={props.onPrevious}
+          >
+            Previous
+          </button>
+          <span className="pager-text">
+            {pageLabel(currentPage, catalogue.page_size, catalogue.total)}
+          </span>
+          <button
+            type="button"
+            className="pager-button"
+            disabled={
+              props.loading ||
+              !canGoNext(currentPage, catalogue.page_size, catalogue.total)
+            }
+            onClick={props.onNext}
+          >
+            Next
+          </button>
+        </div>
+      ) : null}
       {selectedBookId !== null ? (
         <section className="book-detail" aria-live="polite">
           {detailLoading ? (

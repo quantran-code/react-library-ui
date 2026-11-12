@@ -103,6 +103,62 @@ tr.error-row td {
   font-weight: 600;
 }
 
+/* The catalogue's search box, above the table; the term is debounced, so the
+   rows stay put while it is typed. */
+.catalogue-search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+}
+
+.catalogue-search label {
+  font-weight: 600;
+}
+
+.catalogue-search input {
+  flex: 1 1 18rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #d0d5dd;
+  border-radius: 6px;
+  font: inherit;
+}
+
+.catalogue-search input:focus {
+  outline: 2px solid #1d4ed8;
+  outline-offset: 1px;
+}
+
+/* The pager below the table: the page label between Previous and Next. */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.pager-text {
+  color: #475467;
+}
+
+.pager-button {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid #475467;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #475467;
+  font: inherit;
+  cursor: pointer;
+}
+
+.pager-button:disabled {
+  border-color: #d0d5dd;
+  background: #f2f4f7;
+  color: #98a2b3;
+  cursor: not-allowed;
+}
+
 /* Returning a loan's copy; the button stays disabled while the request is out. */
 .loan-return-button {
   padding: 0.25rem 0.75rem;

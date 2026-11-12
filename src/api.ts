@@ -1,3 +1,5 @@
+import { DEFAULT_PAGE_SIZE } from "./paging";
+
 // One place for the gateway's address and the shapes the UI reads.
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -23,6 +25,16 @@ export type Book = {
   title: string;
   author: string;
   available: boolean;
+};
+
+// One page of the catalogue as the gateway sends it: items holds only the rows
+// of this page, while total counts every match before paging, so the UI can
+// derive the page count rather than infer it from a short page.
+export type BookPage = {
+  items: Book[];
+  total: number;
+  page: number;
+  page_size: number;
 };
 
 // A recorded loan as the gateway sends it: the timestamps are RFC 3339 in UTC,
@@ -132,14 +144,29 @@ export async function fetchHealth(requestId?: string): Promise<Health> {
 }
 
 // The catalogue itself: /api/books is the gateway route, proxied by vite in dev.
-export async function fetchBooks(requestId?: string): Promise<Book[]> {
+// page and page_size always travel, while q is sent only for a real search so a
+// blank box reads the catalogue rather than searching it for nothing.
+export async function fetchBooks(
+  page: number,
+  search: string,
+  requestId?: string,
+): Promise<BookPage> {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(DEFAULT_PAGE_SIZE),
+  });
+  const trimmed = search.trim();
+  if (trimmed !== "") {
+    params.set("q", trimmed);
+  }
+
   const response = await sendRequest(
-    `${BASE_URL}/api/books`,
+    `${BASE_URL}/api/books?${params.toString()}`,
     "books",
     undefined,
     requestId,
   );
-  return (await response.json()) as Book[];
+  return (await response.json()) as BookPage;
 }
 
 export async function fetchBook(

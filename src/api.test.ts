@@ -84,20 +84,123 @@ async function returnFailure(loanId: number): Promise<LendingError> {
   throw new Error(`returnLoan(${loanId}) did not fail`);
 }
 
+// The URL a stubbed fetch was called with, parsed so its path and query can be
+// asserted separately; the base is only there to make a relative path absolute.
+function sentUrl(fetchMock: FetchMock, callIndex = 0): URL {
+  const call = fetchMock.mock.calls[callIndex];
+  if (call === undefined) {
+    throw new Error(`fetch call ${callIndex} was never made`);
+  }
+  return new URL(call[0], "http://library.test");
+}
+
 describe("catalogue API", () => {
   it("reads the catalogue from /api/books", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => [{ id: 1, title: "Dune", author: "Herbert", available: true }],
+      json: async () => ({
+        items: [
+          { id: 1, title: "Dune", author: "Herbert", available: true },
+        ],
+        total: 1,
+        page: 1,
+        page_size: 20,
+      }),
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const books = await fetchBooks();
+    const catalogue = await fetchBooks(1, "");
 
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/books");
+    const url = sentUrl(fetchMock);
+    expect(url.pathname).toBe("/api/books");
+    expect(url.searchParams.get("page")).toBe("1");
+    expect(url.searchParams.get("page_size")).toBe("20");
     expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
-    expect(books).toHaveLength(1);
-    expect(books[0].title).toBe("Dune");
+    expect(catalogue.items).toHaveLength(1);
+    expect(catalogue.items[0].title).toBe("Dune");
+  });
+
+  it("sends page, page_size and the search term to /api/books", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ items: [], total: 0, page: 2, page_size: 20 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchBooks(2, "dune");
+    await fetchBooks(1, "");
+
+    const searched = sentUrl(fetchMock);
+    expect(searched.pathname).toBe("/api/books");
+    expect(searched.searchParams.get("page")).toBe("2");
+    expect(searched.searchParams.get("page_size")).toBe("20");
+    expect(searched.searchParams.get("q")).toBe("dune");
+    expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
+
+    const unfiltered = sentUrl(fetchMock, 1);
+    expect(unfiltered.searchParams.get("page")).toBe("1");
+    expect(unfiltered.searchParams.get("page_size")).toBe("20");
+    expect(unfiltered.searchParams.has("q")).toBe(false);
+  });
+
+  it("sends a search containing spaces and an ampersand verbatim", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ items: [], total: 0, page: 1, page_size: 20 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchBooks(1, "go & data");
+
+    expect(sentUrl(fetchMock).searchParams.get("q")).toBe("go & data");
+  });
+
+  it("reads the envelope's rows, total, page and page size", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        items: [
+          { id: 3, title: "Dune", author: "Herbert", available: false },
+        ],
+        total: 3,
+        page: 2,
+        page_size: 20,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const catalogue = await fetchBooks(2, "dune");
+
+    expect(catalogue.items).toHaveLength(1);
+    expect(catalogue.items[0].id).toBe(3);
+    expect(catalogue.total).toBe(3);
+    expect(catalogue.page).toBe(2);
+    expect(catalogue.page_size).toBe(20);
+  });
+
+  it("surfaces a bad paging answer as the API's message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: "invalid paging" }),
+      }),
+    );
+
+    let failure: LendingError | null = null;
+    try {
+      await fetchBooks(0, "");
+    } catch (reason: unknown) {
+      if (reason instanceof LendingError) {
+        failure = reason;
+      } else {
+        throw reason;
+      }
+    }
+
+    expect(failure?.message).toBe("invalid paging");
+    expect(failure?.status).toBe(400);
   });
 
 
@@ -349,12 +452,12 @@ describe("request ids", () => {
   it("mints a different 32-hex id for each user action", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => [],
+      json: async () => ({ items: [], total: 0, page: 1, page_size: 20 }),
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await fetchBooks();
-    await fetchBooks();
+    await fetchBooks(1, "");
+    await fetchBooks(1, "");
 
     const [first, second] = sentRequestIds(fetchMock);
     expect(first).toMatch(REQUEST_ID_PATTERN);
