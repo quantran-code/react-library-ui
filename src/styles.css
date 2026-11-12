@@ -43,6 +43,30 @@ tr.error-row td {
   background: #eff8ff;
 }
 
+/* Borrowing a row's copy; the button stays disabled while the request is out. */
+.borrow-button {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid #1d4ed8;
+  border-radius: 6px;
+  background: #1d4ed8;
+  color: #ffffff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.borrow-button:disabled {
+  border-color: #d0d5dd;
+  background: #f2f4f7;
+  color: #98a2b3;
+  cursor: not-allowed;
+}
+
+/* The message the API returned for a refused borrow, under its own row. */
+.borrow-error-row td {
+  color: #b42318;
+  font-weight: 600;
+}
+
 /* The detail area below the table, for the book the user selected. */
 .book-detail {
   margin-top: 1.5rem;
