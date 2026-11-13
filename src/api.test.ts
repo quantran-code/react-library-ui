@@ -12,12 +12,14 @@ import {
   fetchBook,
   fetchBooks,
   fetchHealth,
+  fetchImportJob,
   fetchLoan,
   fetchLoans,
   filenameFromDisposition,
   importBooks,
   newRequestId,
   returnLoan,
+  submitImportJob,
 } from "./api";
 import type { CsvDownload } from "./api";
 
@@ -33,6 +35,9 @@ const REQUEST_ID_PATTERN = /^[0-9a-f]{32}$/;
 
 // A 32-hex id standing in for the one the gateway echoes back.
 const ANSWERED_ID = "9f2c4a1e8b7d4c3fa1b2c3d4e5f60718";
+
+// The uuid the catalogue service mints for an accepted import job.
+const JOB_ID = "3f7c1d92-5a64-4b8e-9c71-0d2fa6b45e18";
 
 type FetchMock = ReturnType<typeof vi.fn>;
 
@@ -138,6 +143,20 @@ async function exportFailure(
     throw reason;
   }
   throw new Error("the export did not fail");
+}
+
+// Collects the LendingError a refused job submission throws, failing the test if
+// the call did not reject at all.
+async function submitJobFailure(file: File): Promise<LendingError> {
+  try {
+    await submitImportJob(file);
+  } catch (reason: unknown) {
+    if (reason instanceof LendingError) {
+      return reason;
+    }
+    throw reason;
+  }
+  throw new Error("submitImportJob did not fail");
 }
 
 // The URL a stubbed fetch was called with, parsed so its path and query can be
@@ -618,6 +637,152 @@ describe("catalogue API", () => {
       expect(tooLarge.message).toBe("file too large");
       expect(tooLarge.status).toBe(413);
       expect(tooLarge.rows).toEqual([]);
+    });
+  });
+
+  describe("submitImportJob", () => {
+    it("posts the file as the only part of a multipart import job", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 202,
+        json: async () => ({
+          jobId: JOB_ID,
+          status: "queued",
+          totalRows: 250,
+          batchSize: 100,
+          batches: 3,
+        }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const file = csvFile();
+      const accepted = await submitImportJob(file);
+
+      expect(fetchMock.mock.calls).toHaveLength(1);
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/books/import-jobs");
+      expect(sentInit(fetchMock)?.method).toBe("POST");
+      // The browser writes the multipart Content-Type, boundary and all, so the
+      // module must not set one of its own.
+      expect(new Headers(sentInit(fetchMock)?.headers).has("Content-Type")).toBe(
+        false,
+      );
+      expect([...sentFormData(fetchMock).keys()]).toEqual(["file"]);
+      expect(sentFormData(fetchMock).get("file")).toBe(file);
+      expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
+      expect(accepted.jobId).toBe(JOB_ID);
+      expect(accepted.status).toBe("queued");
+      expect(accepted.totalRows).toBe(250);
+      expect(accepted.batchSize).toBe(100);
+      expect(accepted.batches).toBe(3);
+    });
+
+    it("reads an import job status", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          jobId: JOB_ID,
+          status: "processing",
+          totalRows: 250,
+          processedRows: 100,
+          imported: 98,
+          skipped: 2,
+          batches: 3,
+          completedBatches: 1,
+          errors: [{ line: 7, error: "author is required" }],
+          more: false,
+          createdAt: "2024-05-01T10:00:00Z",
+          updatedAt: "2024-05-01T10:00:01Z",
+        }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const job = await fetchImportJob(JOB_ID);
+
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        `/api/books/import-jobs/${JOB_ID}`,
+      );
+      expect(sentInit(fetchMock)?.method).toBeUndefined();
+      expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
+      expect(job.jobId).toBe(JOB_ID);
+      expect(job.status).toBe("processing");
+      expect(job.totalRows).toBe(250);
+      expect(job.processedRows).toBe(100);
+      expect(job.imported).toBe(98);
+      expect(job.skipped).toBe(2);
+      expect(job.completedBatches).toBe(1);
+      expect(job.errors).toEqual([{ line: 7, error: "author is required" }]);
+      expect(job.more).toBe(false);
+    });
+
+    it("reads more true and a failed job's own error", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            jobId: JOB_ID,
+            status: "failed",
+            totalRows: 250,
+            processedRows: 100,
+            imported: 0,
+            skipped: 0,
+            batches: 3,
+            completedBatches: 1,
+            errors: [{ line: 3, error: "title is required" }],
+            more: true,
+            createdAt: "2024-05-01T10:00:00Z",
+            updatedAt: "2024-05-01T10:00:20Z",
+            error: "import batch failed after 3 retries",
+          }),
+        }),
+      );
+
+      const job = await fetchImportJob(JOB_ID);
+
+      expect(job.status).toBe("failed");
+      expect(job.more).toBe(true);
+      expect(job.error).toBe("import batch failed after 3 retries");
+    });
+
+    it("reports the queue unavailable message", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: async () => ({ error: "queue unavailable" }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const unavailable = await submitJobFailure(csvFile());
+
+      expect(unavailable.message).toBe("queue unavailable");
+      expect(unavailable.status).toBe(503);
+      expect(unavailable.requestId).toMatch(REQUEST_ID_PATTERN);
+      expect(unavailable.requestId).toBe(sentRequestId(fetchMock));
+
+      // An invalid file is refused the way the synchronous import refuses one:
+      // the API's own wording, with the id of the request that failed.
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 400,
+          json: async () => ({
+            error: "invalid import file",
+            rows: [{ line: 2, error: "title is required" }],
+            more: false,
+          }),
+        }),
+      );
+
+      const invalid = await submitJobFailure(csvFile());
+
+      expect(invalid.message).toBe("invalid import file");
+      expect(invalid.status).toBe(400);
+      expect(failureText(invalid, "import job failed")).toBe(
+        `invalid import file (Request ${invalid.requestId} failed)`,
+      );
     });
   });
 

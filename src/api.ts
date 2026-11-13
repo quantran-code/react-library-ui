@@ -82,6 +82,42 @@ export type ImportResult = {
   skipped: number;
 };
 
+// The four states an import job moves through: it is queued until a consumer
+// claims its first batch, processing while batches are being written, and then
+// completed or failed for good.
+export type ImportJobStatus = "queued" | "processing" | "completed" | "failed";
+
+// An asynchronous import job as the status route reports it: the counts rise
+// batch by batch, errors aggregates the per-row refusals of the batches written
+// so far (capped, with more saying the cap truncated the list), and error
+// carries the job-level wording once the job has failed, which is why it is
+// optional and absent while the job is still going.
+export type ImportJob = {
+  jobId: string;
+  status: ImportJobStatus;
+  totalRows: number;
+  processedRows: number;
+  imported: number;
+  skipped: number;
+  batches: number;
+  completedBatches: number;
+  errors: ImportRowError[];
+  more: boolean;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+};
+
+// What a 202 answered with: the job the service queued and the shape of the work
+// it accepted, which the page shows and then polls the status route for.
+export type ImportJobAccepted = {
+  jobId: string;
+  status: ImportJobStatus;
+  totalRows: number;
+  batchSize: number;
+  batches: number;
+};
+
 // One row the service refused, as an import body reports it: the 1-based line
 // the record starts on in the uploaded file, and why that row did not import.
 export type ImportRowError = {
@@ -370,6 +406,45 @@ export async function importBooks(
     throw await readImportFailure(response, sentId);
   }
   return (await response.json()) as ImportResult;
+}
+
+// Starting an import job: POST /api/books/import-jobs takes the same single CSV
+// file part as the synchronous import and answers 202 with the job the service
+// queued, instead of storing the rows on this request. The browser writes the
+// multipart Content-Type and its boundary itself, so none is set here; a
+// refusal (a service with no queue answers 503) throws the LendingError every
+// error surface renders, carrying the API's own wording.
+export async function submitImportJob(
+  file: File,
+  requestId?: string,
+): Promise<ImportJobAccepted> {
+  const body = new FormData();
+  body.append("file", file);
+
+  const response = await sendRequest(
+    `${BASE_URL}/api/books/import-jobs`,
+    "import job",
+    { method: "POST", body },
+    requestId,
+  );
+  return (await response.json()) as ImportJobAccepted;
+}
+
+// One poll of a job: the status body the catalogue page renders, including the
+// rows the batches refused and whether that list was capped. A refusal (an
+// unknown or expired job) throws the LendingError, so the poller can stop on a
+// status the page can show rather than reading a body that is not a job.
+export async function fetchImportJob(
+  jobId: string,
+  requestId?: string,
+): Promise<ImportJob> {
+  const response = await sendRequest(
+    `${BASE_URL}/api/books/import-jobs/${jobId}`,
+    `import job ${jobId}`,
+    undefined,
+    requestId,
+  );
+  return (await response.json()) as ImportJob;
 }
 
 // The loans on record, newest first; the service answers [] when there are none.

@@ -148,7 +148,8 @@ tr.error-row td {
   font: inherit;
 }
 
-.catalogue-import-button {
+.catalogue-import-button,
+.catalogue-job-button {
   padding: 0.25rem 0.75rem;
   border: 1px solid #1d4ed8;
   border-radius: 6px;
@@ -169,7 +170,8 @@ tr.error-row td {
 }
 
 .catalogue-import-button:disabled,
-.catalogue-export-button:disabled {
+.catalogue-export-button:disabled,
+.catalogue-job-button:disabled {
   border-color: #d0d5dd;
   background: #f2f4f7;
   color: #98a2b3;
@@ -192,6 +194,30 @@ tr.error-row td {
 
 /* One entry per row the import refused, each naming the line it starts on. */
 .catalogue-tools-rows {
+  margin: 0.5rem 0 0;
+  padding-left: 1.25rem;
+  color: #b42318;
+  overflow-wrap: anywhere;
+}
+
+/* The asynchronous import job: the line carrying the job id, its status and how
+   far it has got, including the note that a capped error list was truncated. */
+.catalogue-job-status {
+  margin: 0.5rem 0 0;
+  color: #475467;
+}
+
+/* The API's wording for a refused job submit or a job that failed, which keeps
+   the table's own rows on screen. */
+.catalogue-job-error {
+  margin: 0.5rem 0 0;
+  color: #b42318;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* The row errors a job's batches refused so far, each naming its line. */
+.catalogue-job-rows {
   margin: 0.5rem 0 0;
   padding-left: 1.25rem;
   color: #b42318;

@@ -5,10 +5,19 @@ import {
   exportBooksCsv,
   failureText,
   fetchBook,
+  fetchImportJob,
   importBooks,
   ImportError,
+  submitImportJob,
 } from "./api";
-import type { Book, BookPage, ImportRowError } from "./api";
+import type { Book, BookPage, ImportJob, ImportRowError } from "./api";
+import {
+  IMPORT_JOB_POLL_MS,
+  isTerminalStatus,
+  jobMoreNote,
+  jobProgressLabel,
+  jobSummaryLabel,
+} from "./importJob";
 import {
   canGoNext,
   canGoPrevious,
@@ -72,6 +81,20 @@ export default function BookTable(props: BookTableProps): JSX.Element {
   // The same double-click guards as the borrow button, one per control.
   const importInFlight = useRef(false);
   const exportBooksInFlight = useRef(false);
+  // The asynchronous import job the page is tracking: the id the 202 answered
+  // with, and the last status body read for it. The status body only ever comes
+  // from a poll answer, so the labels below always describe the service.
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [job, setJob] = useState<ImportJob | null>(null);
+  const [startingJob, setStartingJob] = useState(false);
+  // What a refused job submit (or a refused status read) answered, rendered
+  // through failureText so a service with no queue reads "queue unavailable".
+  const [jobSubmitError, setJobSubmitError] = useState<string | null>(null);
+  // The same double-click guard as the other controls, and the job whose
+  // completion was already handed to the page, so the catalogue is read again
+  // once per job rather than once per render.
+  const startJobInFlight = useRef(false);
+  const refreshedJobId = useRef<string | null>(null);
 
   const catalogue = props.catalogue;
   const bookRows = catalogue?.items ?? [];
@@ -89,6 +112,65 @@ export default function BookTable(props: BookTableProps): JSX.Element {
     setDetailLoading(false);
     setRowErrors({});
   }, [catalogue?.page, props.query]);
+
+  // An accepted job is read once a second until it is completed or failed. The
+  // chain re-arms with a timeout after each answer rather than with an interval,
+  // so a slow status read cannot pile requests up; the timer is cleared when the
+  // page unmounts or a newer job id replaces this one, and nothing is scheduled
+  // once the status is terminal. A completed job asks the page to read the
+  // catalogue again exactly once, which is what shows the imported books.
+  useEffect(() => {
+    if (jobId === null) {
+      return;
+    }
+    // The poll chain closes over the id as a plain string, so every answer is
+    // read for the job this effect was started for.
+    const trackedJobId: string = jobId;
+
+    let cancelled = false;
+    let timer: number | undefined;
+
+    async function poll(): Promise<void> {
+      try {
+        const answered = await fetchImportJob(trackedJobId);
+        if (cancelled) {
+          return;
+        }
+        setJob(answered);
+        if (isTerminalStatus(answered.status)) {
+          if (
+            answered.status === "completed" &&
+            refreshedJobId.current !== answered.jobId
+          ) {
+            refreshedJobId.current = answered.jobId;
+            props.onImported();
+          }
+          return;
+        }
+      } catch (reason: unknown) {
+        if (cancelled) {
+          return;
+        }
+        setJobSubmitError(failureText(reason, "import job unavailable"));
+        return;
+      }
+
+      timer = window.setTimeout(() => {
+        void poll();
+      }, IMPORT_JOB_POLL_MS);
+    }
+
+    timer = window.setTimeout(() => {
+      void poll();
+    }, IMPORT_JOB_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [jobId, props.onImported]);
 
   // Selecting a row reads that one book through the gateway's detail route, so
   // the detail area below the table always shows what the service reports.
@@ -199,6 +281,50 @@ export default function BookTable(props: BookTableProps): JSX.Element {
     }
   }
 
+  // Starting a job sends the same chosen file as the synchronous import does,
+  // but the service answers 202 with the job it queued instead of storing the
+  // rows on this request; the poll above then follows it to the end. A refusal
+  // shows the API's own wording (a service with no queue says "queue
+  // unavailable") and leaves the table, pager and detail exactly as they were.
+  async function handleStartJob(): Promise<void> {
+    if (importFile === null || startJobInFlight.current) {
+      return;
+    }
+    startJobInFlight.current = true;
+    setStartingJob(true);
+    setJobSubmitError(null);
+    setJobId(null);
+    setJob(null);
+
+    try {
+      const accepted = await submitImportJob(importFile);
+      setJobId(accepted.jobId);
+    } catch (reason: unknown) {
+      setJobSubmitError(failureText(reason, "import job failed"));
+    } finally {
+      startJobInFlight.current = false;
+      setStartingJob(false);
+    }
+  }
+
+  // A job the page is tracking keeps its button disabled until it settles; the
+  // window between the 202 and the first status answer counts as queued.
+  const jobRunning =
+    jobId !== null && (job === null || !isTerminalStatus(job.status));
+  // The status line: the accepted job before its first answer, then what the
+  // status route last reported, with the progress rising as batches complete.
+  const jobStatusLine =
+    job !== null
+      ? `Job ${job.jobId}: ${job.status} — ${jobProgressLabel(job)}, ${jobSummaryLabel(job)}`
+      : jobId !== null
+        ? `Job ${jobId}: queued`
+        : null;
+  const jobMore = job === null ? null : jobMoreNote(job);
+  const jobFailureText =
+    job !== null && job.status === "failed"
+      ? (job.error ?? "Import job failed")
+      : null;
+
   // The empty catalogue reads differently from a search that matched nothing, so
   // the wording comes from the query the rows were fetched for. A refusal shows
   // the API's own message instead, never an empty list.
@@ -243,7 +369,36 @@ export default function BookTable(props: BookTableProps): JSX.Element {
         >
           Export books
         </button>
+        <button
+          type="button"
+          className="catalogue-job-button"
+          disabled={importFile === null || startingJob || jobRunning}
+          onClick={handleStartJob}
+        >
+          Start import job
+        </button>
       </div>
+      {jobStatusLine !== null ? (
+        <p className="catalogue-job-status">{jobStatusLine}</p>
+      ) : null}
+      {jobFailureText !== null ? (
+        <p className="catalogue-job-error">{jobFailureText}</p>
+      ) : null}
+      {jobSubmitError !== null ? (
+        <p className="catalogue-job-error">{jobSubmitError}</p>
+      ) : null}
+      {job !== null && job.errors.length > 0 ? (
+        <ul className="catalogue-job-rows">
+          {job.errors.slice(0, 20).map((row) => (
+            <li key={`${row.line}:${row.error}`}>
+              line {row.line}: {row.error}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {jobMore !== null ? (
+        <p className="catalogue-job-status">{jobMore}</p>
+      ) : null}
       {importMessage !== null ? (
         <p className="catalogue-tools-status">{importMessage}</p>
       ) : null}
