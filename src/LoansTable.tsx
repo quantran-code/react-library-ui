@@ -2,11 +2,12 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import {
   downloadCsv,
   exportLoansCsv,
+  exportLoansToS3,
   failureText,
   fetchLoans,
   returnLoan,
 } from "./api";
-import type { Book, Loan } from "./api";
+import type { Book, Loan, StoredExport } from "./api";
 
 // What the loan rows render; the page holds the catalogue so a title can be
 // resolved from the books it already fetched and a return can flip the shelf.
@@ -44,6 +45,16 @@ export default function LoansTable(props: LoansTableProps): JSX.Element {
   const [loansExportError, setLoansExportError] = useState<string | null>(null);
   // The same guard for the export button, so a second click sends nothing.
   const exportLoansInFlight = useRef(false);
+  // The loan CSV this export stored in the private bucket: the key it was
+  // stored under, a presigned GET for it and when that link stops working.
+  const [loansS3Export, setLoansS3Export] = useState<StoredExport | null>(null);
+  const [exportingLoansS3, setExportingLoansS3] = useState(false);
+  // The API's wording for a refused export to the bucket.
+  const [loansS3ExportError, setLoansS3ExportError] = useState<string | null>(
+    null,
+  );
+  // The same double-click guard as the export button above.
+  const exportLoansS3InFlight = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -134,6 +145,28 @@ export default function LoansTable(props: LoansTableProps): JSX.Element {
     }
   }
 
+  // Exporting to the bucket stores the same CSV the download answers with under
+  // a key the service minted, so the answer is only the key and a presigned GET
+  // for it; a refusal shows the API's message and stores nothing.
+  async function handleExportLoansToS3(): Promise<void> {
+    if (exportLoansS3InFlight.current) {
+      return;
+    }
+    exportLoansS3InFlight.current = true;
+    setExportingLoansS3(true);
+    setLoansS3ExportError(null);
+    setLoansS3Export(null);
+
+    try {
+      setLoansS3Export(await exportLoansToS3());
+    } catch (reason: unknown) {
+      setLoansS3ExportError(failureText(reason, "loans export to S3 failed"));
+    } finally {
+      exportLoansS3InFlight.current = false;
+      setExportingLoansS3(false);
+    }
+  }
+
   return (
     <>
       <div className="loans-tools">
@@ -145,9 +178,38 @@ export default function LoansTable(props: LoansTableProps): JSX.Element {
         >
           Export loans
         </button>
+        <button
+          type="button"
+          className="loans-s3-export-button"
+          disabled={exportingLoansS3}
+          onClick={handleExportLoansToS3}
+        >
+          Export loans to S3
+        </button>
       </div>
       {loansExportError !== null ? (
         <p className="loans-export-error">{loansExportError}</p>
+      ) : null}
+      {loansS3Export !== null ? (
+        <p className="loans-s3-key">
+          Stored {loansS3Export.key}
+          {" — "}
+          <a
+            className="loans-s3-link"
+            href={loansS3Export.url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open exported loans
+          </a>
+          {" — "}
+          <span className="loans-s3-expiry">
+            link expires {loansS3Export.expiresAt}
+          </span>
+        </p>
+      ) : null}
+      {loansS3ExportError !== null ? (
+        <p className="loans-export-error">{loansS3ExportError}</p>
       ) : null}
       <table>
         <thead>

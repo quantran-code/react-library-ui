@@ -3,14 +3,24 @@ import {
   borrowBook,
   downloadCsv,
   exportBooksCsv,
+  exportBooksToS3,
   failureText,
   fetchBook,
   fetchImportJob,
   importBooks,
+  importBooksFromS3,
   ImportError,
   submitImportJob,
+  uploadFileToS3,
 } from "./api";
-import type { Book, BookPage, ImportJob, ImportRowError } from "./api";
+import type {
+  Book,
+  BookPage,
+  ImportJob,
+  ImportRowError,
+  StoredExport,
+  StoredFile,
+} from "./api";
 import {
   IMPORT_JOB_POLL_MS,
   isTerminalStatus,
@@ -95,6 +105,34 @@ export default function BookTable(props: BookTableProps): JSX.Element {
   // once per job rather than once per render.
   const startJobInFlight = useRef(false);
   const refreshedJobId = useRef<string | null>(null);
+  // The object the same file was uploaded to: the key the service minted and
+  // the presigned link to it, which is the only way its bytes are reachable.
+  const [uploadedFile, setUploadedFile] = useState<StoredFile | null>(null);
+  const [uploadingS3, setUploadingS3] = useState(false);
+  // The API's wording for a refused upload, shown beside the controls.
+  const [s3UploadError, setS3UploadError] = useState<string | null>(null);
+  // The key the Import from S3 control sends, prefilled from an upload so the
+  // librarian can import the file they just stored without retyping it.
+  const [s3Key, setS3Key] = useState("");
+  const [importingS3, setImportingS3] = useState(false);
+  // What importing a stored key answered: the counts, or the API's own refusal
+  // with the rows it could not take, in the same lists the import uses.
+  const [s3ImportMessage, setS3ImportMessage] = useState<string | null>(null);
+  const [s3ImportError, setS3ImportError] = useState<string | null>(null);
+  const [s3ImportRowErrors, setS3ImportRowErrors] = useState<ImportRowError[]>(
+    [],
+  );
+  // The catalogue export stored in the bucket: its key, presigned link and the
+  // moment that link stops working.
+  const [booksS3Export, setBooksS3Export] = useState<StoredExport | null>(null);
+  const [exportingBooksS3, setExportingBooksS3] = useState(false);
+  const [booksS3ExportError, setBooksS3ExportError] = useState<string | null>(
+    null,
+  );
+  // The same double-click guards as the other controls, one per S3 control.
+  const uploadS3InFlight = useRef(false);
+  const importS3InFlight = useRef(false);
+  const exportBooksS3InFlight = useRef(false);
 
   const catalogue = props.catalogue;
   const bookRows = catalogue?.items ?? [];
@@ -307,6 +345,83 @@ export default function BookTable(props: BookTableProps): JSX.Element {
     }
   }
 
+  // Uploading the chosen file to the private bucket: the service mints the key
+  // and answers with a presigned GET for it, so the key is shown here and
+  // prefilled into the Import from S3 box, and the link is the only way the
+  // bytes are reachable — this page never touches a credential.
+  async function handleUploadToS3(): Promise<void> {
+    if (importFile === null || uploadS3InFlight.current) {
+      return;
+    }
+    uploadS3InFlight.current = true;
+    setUploadingS3(true);
+    setS3UploadError(null);
+    setUploadedFile(null);
+
+    try {
+      const stored = await uploadFileToS3(importFile);
+      setUploadedFile(stored);
+      setS3Key(stored.key);
+    } catch (reason: unknown) {
+      setS3UploadError(failureText(reason, "upload to S3 failed"));
+    } finally {
+      uploadS3InFlight.current = false;
+      setUploadingS3(false);
+    }
+  }
+
+  // Importing a stored key asks the service to fetch that object itself and
+  // apply the same CSV rules the synchronous import applies, so a refusal can
+  // still list the rows it could not take. A success hands the catalogue back
+  // to the page through onImported, exactly as a synchronous import does.
+  async function handleImportFromS3(): Promise<void> {
+    const key = s3Key.trim();
+    if (key === "" || importS3InFlight.current) {
+      return;
+    }
+    importS3InFlight.current = true;
+    setImportingS3(true);
+    setS3ImportMessage(null);
+    setS3ImportError(null);
+    setS3ImportRowErrors([]);
+
+    try {
+      const result = await importBooksFromS3(key);
+      setS3ImportMessage(
+        `Imported ${result.imported} books, skipped ${result.skipped}`,
+      );
+      props.onImported();
+    } catch (reason: unknown) {
+      setS3ImportError(failureText(reason, "import from S3 failed"));
+      setS3ImportRowErrors(reason instanceof ImportError ? reason.rows : []);
+    } finally {
+      importS3InFlight.current = false;
+      setImportingS3(false);
+    }
+  }
+
+  // Exporting to the bucket stores the same CSV GET /books/export answers with
+  // under a key the service minted, so the answer is only the key and a
+  // presigned GET for it; a refusal starts nothing and leaves the rows alone.
+  async function handleExportBooksToS3(): Promise<void> {
+    if (exportBooksS3InFlight.current) {
+      return;
+    }
+    exportBooksS3InFlight.current = true;
+    setExportingBooksS3(true);
+    setBooksS3ExportError(null);
+    setBooksS3Export(null);
+
+    try {
+      setBooksS3Export(await exportBooksToS3());
+    } catch (reason: unknown) {
+      setBooksS3ExportError(failureText(reason, "books export to S3 failed"));
+    } finally {
+      exportBooksS3InFlight.current = false;
+      setExportingBooksS3(false);
+    }
+  }
+
   // A job the page is tracking keeps its button disabled until it settles; the
   // window between the 202 and the first status answer counts as queued.
   const jobRunning =
@@ -371,6 +486,14 @@ export default function BookTable(props: BookTableProps): JSX.Element {
         </button>
         <button
           type="button"
+          className="catalogue-s3-upload-button"
+          disabled={importFile === null || uploadingS3}
+          onClick={handleUploadToS3}
+        >
+          Upload CSV to S3
+        </button>
+        <button
+          type="button"
           className="catalogue-job-button"
           disabled={importFile === null || startingJob || jobRunning}
           onClick={handleStartJob}
@@ -378,6 +501,89 @@ export default function BookTable(props: BookTableProps): JSX.Element {
           Start import job
         </button>
       </div>
+      {uploadedFile !== null ? (
+        <p className="catalogue-s3-key">
+          Stored {uploadedFile.key}
+          {" — "}
+          <a
+            className="catalogue-s3-link"
+            href={uploadedFile.url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open uploaded file
+          </a>
+          {" — "}
+          <span className="catalogue-s3-expiry">
+            link expires {uploadedFile.expiresAt}
+          </span>
+        </p>
+      ) : null}
+      {s3UploadError !== null ? (
+        <p className="catalogue-tools-error">{s3UploadError}</p>
+      ) : null}
+      <div className="catalogue-tools">
+        <label htmlFor="catalogue-s3-key">Object key</label>
+        <input
+          id="catalogue-s3-key"
+          type="text"
+          value={s3Key}
+          placeholder="uploads/…"
+          onChange={(event) => setS3Key(event.target.value)}
+        />
+        <button
+          type="button"
+          className="catalogue-s3-button"
+          disabled={s3Key.trim() === "" || importingS3}
+          onClick={handleImportFromS3}
+        >
+          Import from S3
+        </button>
+        <button
+          type="button"
+          className="catalogue-s3-button"
+          disabled={exportingBooksS3}
+          onClick={handleExportBooksToS3}
+        >
+          Export books to S3
+        </button>
+      </div>
+      {booksS3Export !== null ? (
+        <p className="catalogue-s3-key">
+          Stored {booksS3Export.key}
+          {" — "}
+          <a
+            className="catalogue-s3-link"
+            href={booksS3Export.url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open exported books
+          </a>
+          {" — "}
+          <span className="catalogue-s3-expiry">
+            link expires {booksS3Export.expiresAt}
+          </span>
+        </p>
+      ) : null}
+      {booksS3ExportError !== null ? (
+        <p className="catalogue-tools-error">{booksS3ExportError}</p>
+      ) : null}
+      {s3ImportMessage !== null ? (
+        <p className="catalogue-tools-status">{s3ImportMessage}</p>
+      ) : null}
+      {s3ImportError !== null ? (
+        <p className="catalogue-tools-error">{s3ImportError}</p>
+      ) : null}
+      {s3ImportRowErrors.length > 0 ? (
+        <ul className="catalogue-tools-rows">
+          {s3ImportRowErrors.slice(0, 20).map((row) => (
+            <li key={`${row.line}:${row.error}`}>
+              line {row.line}: {row.error}
+            </li>
+          ))}
+        </ul>
+      ) : null}
       {jobStatusLine !== null ? (
         <p className="catalogue-job-status">{jobStatusLine}</p>
       ) : null}

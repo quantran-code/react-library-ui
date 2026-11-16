@@ -178,6 +178,56 @@ tr.error-row td {
   cursor: not-allowed;
 }
 
+/* Uploading the chosen file to the private bucket: the primary action of the
+   row, disabled until a file is picked and while the upload is out. */
+.catalogue-s3-upload-button {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid #1d4ed8;
+  border-radius: 6px;
+  background: #1d4ed8;
+  color: #ffffff;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Importing a stored key and exporting the catalogue into the bucket. */
+.catalogue-s3-button {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid #475467;
+  border-radius: 6px;
+  background: #475467;
+  color: #ffffff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.catalogue-s3-upload-button:disabled,
+.catalogue-s3-button:disabled {
+  border-color: #d0d5dd;
+  background: #f2f4f7;
+  color: #98a2b3;
+  cursor: not-allowed;
+}
+
+/* What an upload or export stored: the key the service minted, the presigned
+   link to it and when that link stops working. A key can be long, so it wraps
+   rather than pushing the link off the line. */
+.catalogue-s3-key {
+  margin: 0.5rem 0 0;
+  color: #475467;
+  overflow-wrap: anywhere;
+}
+
+.catalogue-s3-link {
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.catalogue-s3-expiry {
+  color: #475467;
+  font-style: italic;
+}
+
 /* What the import answered: the counts it imported and skipped, or the API's
    own wording for a refusal. */
 .catalogue-tools-status {
@@ -309,6 +359,43 @@ tr.error-row td {
   background: #f2f4f7;
   color: #98a2b3;
   cursor: not-allowed;
+}
+
+/* Storing the same CSV in the private bucket instead of saving it, disabled
+   while that request is out. */
+.loans-s3-export-button {
+  padding: 0.25rem 0.75rem;
+  border: 1px solid #475467;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #475467;
+  font: inherit;
+  cursor: pointer;
+}
+
+.loans-s3-export-button:disabled {
+  border-color: #d0d5dd;
+  background: #f2f4f7;
+  color: #98a2b3;
+  cursor: not-allowed;
+}
+
+/* What the export stored: the key, the presigned link to it and the moment
+   that link expires. A key can be long, so it wraps rather than overflowing. */
+.loans-s3-key {
+  margin: 0.5rem 0 0;
+  color: #475467;
+  overflow-wrap: anywhere;
+}
+
+.loans-s3-link {
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.loans-s3-expiry {
+  color: #475467;
+  font-style: italic;
 }
 
 /* The API's wording for a refused loans export, which starts no download. */

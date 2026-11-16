@@ -7,7 +7,9 @@ import {
   borrowBook,
   downloadCsv,
   exportBooksCsv,
+  exportBooksToS3,
   exportLoansCsv,
+  exportLoansToS3,
   failureText,
   fetchBook,
   fetchBooks,
@@ -17,11 +19,13 @@ import {
   fetchLoans,
   filenameFromDisposition,
   importBooks,
+  importBooksFromS3,
   newRequestId,
   returnLoan,
   submitImportJob,
+  uploadFileToS3,
 } from "./api";
-import type { CsvDownload } from "./api";
+import type { CsvDownload, StoredExport } from "./api";
 
 // The API module is the one place the UI builds URLs; these tests pin the paths
 // the gateway expects and the request id every call carries, without needing a
@@ -127,6 +131,64 @@ async function importFailure(file: File): Promise<ImportError> {
     throw reason;
   }
   throw new Error("importBooks did not fail");
+}
+
+// Collects the LendingError a refused S3 upload throws, failing the test if the
+// call did not reject at all.
+async function uploadFailure(file: File): Promise<LendingError> {
+  try {
+    await uploadFileToS3(file);
+  } catch (reason: unknown) {
+    if (reason instanceof LendingError) {
+      return reason;
+    }
+    throw reason;
+  }
+  throw new Error("uploadFileToS3 did not fail");
+}
+
+// Collects the LendingError a refused S3 import throws, failing the test if the
+// call did not reject at all; an invalid file is an ImportError, which is one.
+async function importFromS3Failure(key: string): Promise<LendingError> {
+  try {
+    await importBooksFromS3(key);
+  } catch (reason: unknown) {
+    if (reason instanceof LendingError) {
+      return reason;
+    }
+    throw reason;
+  }
+  throw new Error("importBooksFromS3 did not fail");
+}
+
+// Collects the ImportError an invalid file read from the bucket throws, failing
+// the test if the call did not reject with the row-refusal shape.
+async function importFromS3ImportFailure(key: string): Promise<ImportError> {
+  try {
+    await importBooksFromS3(key);
+  } catch (reason: unknown) {
+    if (reason instanceof ImportError) {
+      return reason;
+    }
+    throw reason;
+  }
+  throw new Error("importBooksFromS3 did not fail with an invalid import file");
+}
+
+// Collects the LendingError a refused S3 export throws, failing the test if the
+// call did not reject at all.
+async function s3ExportFailure(
+  exportCall: () => Promise<StoredExport>,
+): Promise<LendingError> {
+  try {
+    await exportCall();
+  } catch (reason: unknown) {
+    if (reason instanceof LendingError) {
+      return reason;
+    }
+    throw reason;
+  }
+  throw new Error("the export to S3 did not fail");
 }
 
 // Collects the LendingError a refused export throws, failing the test if the
@@ -640,6 +702,160 @@ describe("catalogue API", () => {
     });
   });
 
+  describe("uploadFileToS3", () => {
+    // The key the catalogue service mints for an accepted upload, and the
+    // presigned GET it answers with for it.
+    const STORED_KEY = "uploads/2f1c0b7a-6d3e-4f5a-9b8c-0d1e2f3a4b5c.csv";
+    const PRESIGNED_URL = `http://localhost:9000/octiq-uploads/${STORED_KEY}?X-Amz-Signature=abc123`;
+
+    it("posts the CSV to /api/files as one file part", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          key: STORED_KEY,
+          url: PRESIGNED_URL,
+          expiresAt: "2024-05-01T10:15:00Z",
+          size: 42,
+          contentType: "text/csv",
+        }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const file = csvFile();
+      const stored = await uploadFileToS3(file);
+
+      expect(fetchMock.mock.calls).toHaveLength(1);
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/files");
+      expect(sentInit(fetchMock)?.method).toBe("POST");
+      // The browser writes the multipart Content-Type, boundary and all, so the
+      // module must not set one of its own.
+      expect(new Headers(sentInit(fetchMock)?.headers).has("Content-Type")).toBe(
+        false,
+      );
+      expect([...sentFormData(fetchMock).keys()]).toEqual(["file"]);
+      expect(sentFormData(fetchMock).get("file")).toBe(file);
+      expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
+
+      expect(stored.key).toBe(STORED_KEY);
+      // The presigned url is used exactly as the API answered with it, so no
+      // signature is built here and no credential is ever read.
+      expect(stored.url).toBe(PRESIGNED_URL);
+      expect(stored.expiresAt).toBe("2024-05-01T10:15:00Z");
+      expect(stored.size).toBe(42);
+      expect(stored.contentType).toBe("text/csv");
+    });
+
+    it("surfaces the API's wording for an unsupported file", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 415,
+          json: async () => ({ error: "unsupported file type" }),
+        }),
+      );
+
+      const failure = await uploadFailure(csvFile("books.txt"));
+
+      expect(failure.message).toBe("unsupported file type");
+      expect(failure.status).toBe(415);
+    });
+
+    it("surfaces storage unavailable when the store is not configured", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: async () => ({ error: "storage unavailable" }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const failure = await uploadFailure(csvFile());
+
+      expect(failure.message).toBe("storage unavailable");
+      expect(failure.status).toBe(503);
+      expect(failure.requestId).toMatch(REQUEST_ID_PATTERN);
+      expect(failure.requestId).toBe(sentRequestId(fetchMock));
+    });
+  });
+
+  describe("importBooksFromS3", () => {
+    it("posts the key to /api/books/import-s3", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: async () => ({ imported: 2, skipped: 1 }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await importBooksFromS3("uploads/example.csv");
+
+      const init = sentInit(fetchMock);
+      expect(fetchMock.mock.calls).toHaveLength(1);
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/books/import-s3");
+      expect(init?.method).toBe("POST");
+      expect(init?.body).toBe(JSON.stringify({ key: "uploads/example.csv" }));
+      expect(new Headers(init?.headers).get("Content-Type")).toBe(
+        "application/json",
+      );
+      expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
+      expect(result.imported).toBe(2);
+      expect(result.skipped).toBe(1);
+    });
+
+    it("surfaces an invalid import file with its row errors", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          error: "invalid import file",
+          rows: [{ line: 3, error: "author is required" }],
+          more: true,
+        }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const failure = await importFromS3ImportFailure("uploads/example.csv");
+
+      expect(failure).toBeInstanceOf(LendingError);
+      expect(failure.message).toBe("invalid import file");
+      expect(failure.status).toBe(400);
+      expect(failure.rows).toEqual([{ line: 3, error: "author is required" }]);
+      expect(failure.more).toBe(true);
+      expect(failure.requestId).toBe(sentRequestId(fetchMock));
+    });
+
+    it("surfaces a missing object and an unreachable store", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 404,
+          json: async () => ({ error: "file not found" }),
+        }),
+      );
+
+      const missing = await importFromS3Failure("uploads/missing.csv");
+
+      expect(missing.message).toBe("file not found");
+      expect(missing.status).toBe(404);
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 502,
+          json: async () => ({ error: "storage unavailable" }),
+        }),
+      );
+
+      const unavailable = await importFromS3Failure("uploads/example.csv");
+
+      expect(unavailable.message).toBe("storage unavailable");
+      expect(unavailable.status).toBe(502);
+    });
+  });
+
   describe("submitImportJob", () => {
     it("posts the file as the only part of a multipart import job", async () => {
       const fetchMock = vi.fn().mockResolvedValue({
@@ -904,6 +1120,93 @@ describe("catalogue API", () => {
       expect(failure.message).toBe("loans unreachable");
       expect(failure.status).toBe(502);
       expect(blob).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("exportToS3", () => {
+    const BOOKS_KEY = "exports/books/5d0e8c31-9a2b-4f6c-8d7e-1a2b3c4d5e6f.csv";
+    const LOANS_KEY = "exports/loans/8b7a6c50-4d3e-2f1a-9b8c-7d6e5f4a3b2c.csv";
+
+    it("posts to /api/books/export-s3 and returns the stored object", async () => {
+      const url = `http://localhost:9000/octiq-uploads/${BOOKS_KEY}?X-Amz-Signature=def456`;
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          key: BOOKS_KEY,
+          url,
+          expiresAt: "2024-05-01T10:15:00Z",
+          size: 128,
+        }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const stored = await exportBooksToS3();
+
+      expect(fetchMock.mock.calls).toHaveLength(1);
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/books/export-s3");
+      expect(sentInit(fetchMock)?.method).toBe("POST");
+      expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
+      expect(stored.key).toBe(BOOKS_KEY);
+      expect(stored.url).toBe(url);
+      expect(stored.expiresAt).toBe("2024-05-01T10:15:00Z");
+      expect(stored.size).toBe(128);
+    });
+
+    it("posts to /api/loans/export-s3 and returns the stored object", async () => {
+      const url = `http://localhost:9000/octiq-uploads/${LOANS_KEY}?X-Amz-Signature=ghi789`;
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          key: LOANS_KEY,
+          url,
+          expiresAt: "2024-05-01T10:15:00Z",
+          size: 96,
+        }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const stored = await exportLoansToS3();
+
+      expect(fetchMock.mock.calls).toHaveLength(1);
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/loans/export-s3");
+      expect(sentInit(fetchMock)?.method).toBe("POST");
+      expect(sentRequestId(fetchMock)).toMatch(REQUEST_ID_PATTERN);
+      expect(stored.key).toBe(LOANS_KEY);
+      expect(stored.url).toBe(url);
+      expect(stored.expiresAt).toBe("2024-05-01T10:15:00Z");
+      expect(stored.size).toBe(96);
+    });
+
+    it("surfaces the API's wording when the store is unavailable", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 502,
+          json: async () => ({ error: "storage unavailable" }),
+        }),
+      );
+
+      const failure = await s3ExportFailure(exportBooksToS3);
+
+      expect(failure.message).toBe("storage unavailable");
+      expect(failure.status).toBe(502);
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 503,
+          json: async () => ({ error: "storage unavailable" }),
+        }),
+      );
+
+      const notConfigured = await s3ExportFailure(exportLoansToS3);
+
+      expect(notConfigured.message).toBe("storage unavailable");
+      expect(notConfigured.status).toBe(503);
     });
   });
 });

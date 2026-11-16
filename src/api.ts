@@ -156,6 +156,27 @@ export type CsvDownload = {
   filename: string;
 };
 
+// A CSV stored in the private bucket as POST /api/files answers: the object key
+// the service minted, a presigned GET for it, and the name and size to show
+// beside it. The url is used exactly as it arrived, so the browser never signs
+// anything and never sees a credential.
+export type StoredFile = {
+  key: string;
+  url: string;
+  expiresAt: string;
+  size: number;
+  contentType: string;
+};
+
+// A catalogue or loan export stored in the bucket: the same key and presigned
+// url, with no content type because the export body does not carry one.
+export type StoredExport = {
+  key: string;
+  url: string;
+  expiresAt: string;
+  size: number;
+};
+
 // The name an export is saved under: the one its Content-Disposition carries,
 // or the caller's fallback when the header is missing or names no file.
 export function filenameFromDisposition(
@@ -408,6 +429,53 @@ export async function importBooks(
   return (await response.json()) as ImportResult;
 }
 
+// Uploading a CSV to the private bucket: the file travels as the one file part
+// POST /api/files takes, and the browser writes the multipart Content-Type and
+// its boundary itself, so none is set here — exactly as the synchronous import
+// sends its file. The answer names the key the service minted and a presigned
+// GET for it, which is the only way the bytes leave the private bucket.
+export async function uploadFileToS3(
+  file: File,
+  requestId?: string,
+): Promise<StoredFile> {
+  const body = new FormData();
+  body.append("file", file);
+
+  const response = await sendRequest(
+    `${BASE_URL}/api/files`,
+    "upload",
+    { method: "POST", body },
+    requestId,
+  );
+  return (await response.json()) as StoredFile;
+}
+
+// Importing an object already in the bucket: the key names a bucket-relative
+// object, never a URL, so the service is the one that fetches it. A refusal is
+// read through the same path the synchronous import uses, because the CSV rules
+// are the same, so an invalid file still carries its rows list and more flag.
+export async function importBooksFromS3(
+  key: string,
+  requestId?: string,
+): Promise<ImportResult> {
+  const sentId = requestId ?? newRequestId();
+
+  const response = await dispatch(
+    `${BASE_URL}/api/books/import-s3`,
+    "import",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+    },
+    sentId,
+  );
+  if (!response.ok) {
+    throw await readImportFailure(response, sentId);
+  }
+  return (await response.json()) as ImportResult;
+}
+
 // Starting an import job: POST /api/books/import-jobs takes the same single CSV
 // file part as the synchronous import and answers 202 with the job the service
 // queued, instead of storing the rows on this request. The browser writes the
@@ -533,6 +601,35 @@ export async function exportLoansCsv(
     LOANS_EXPORT_FILENAME,
     requestId,
   );
+}
+
+// Exporting the catalogue to the bucket: the service renders the same CSV GET
+// /api/books/export answers with and stores it under a key it mints itself, so
+// the answer is only the key and a presigned GET to hand on.
+export async function exportBooksToS3(
+  requestId?: string,
+): Promise<StoredExport> {
+  const response = await sendRequest(
+    `${BASE_URL}/api/books/export-s3`,
+    "books export",
+    { method: "POST" },
+    requestId,
+  );
+  return (await response.json()) as StoredExport;
+}
+
+// The same for the loan records, rendered newest loan first just as
+// GET /api/loans/export renders them.
+export async function exportLoansToS3(
+  requestId?: string,
+): Promise<StoredExport> {
+  const response = await sendRequest(
+    `${BASE_URL}/api/loans/export-s3`,
+    "loans export",
+    { method: "POST" },
+    requestId,
+  );
+  return (await response.json()) as StoredExport;
 }
 
 // Saving a download: the blob the service sent is handed straight to the
